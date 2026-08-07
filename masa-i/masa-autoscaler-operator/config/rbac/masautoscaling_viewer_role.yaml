@@ -1,0 +1,27 @@
+# permissions for end users to view masautoscalings.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: masautoscaling-viewer-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: masa-autoscaler-operator
+    app.kubernetes.io/part-of: masa-autoscaler-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: masautoscaling-viewer-role
+rules:
+- apiGroups:
+  - scaling.masa.com
+  resources:
+  - masautoscalings
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - scaling.masa.com
+  resources:
+  - masautoscalings/status
+  verbs:
+  - get

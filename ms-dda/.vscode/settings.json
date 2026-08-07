@@ -1,6 +1,0 @@
-{
-    "python.analysis.extraPaths": [
-        "./msdda-data-monitoring/docker/src",
-        "./msdda-autoscaler-agent/docker/src"
-    ]
-}

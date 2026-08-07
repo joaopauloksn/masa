@@ -1,0 +1,6 @@
+{
+    "python.analysis.extraPaths": [
+        "./masa-data-monitoring/docker/src",
+        "./masa-autoscaler-agent/docker/src"
+    ]
+}

@@ -1,0 +1,56 @@
+apiVersion: scaling.masa.com/v1alpha1
+kind: MSAgenticScaling
+metadata:
+  labels:
+    app.kubernetes.io/name: masautoscaling
+    app.kubernetes.io/instance: masautoscaling-sample
+    app.kubernetes.io/part-of: masa-autoscaler-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: masa-autoscaler-operator
+  name: masautoscaling-sample
+spec:
+  # ---------------------------------------------------------------------------
+  # Thanos / Prometheus URL
+  # Optional — auto-discovered from the OpenShift route when omitted.
+  # Set this to bypass auto-discovery (local testing, restricted RBAC, etc.).
+  # ---------------------------------------------------------------------------
+  # thanosUrl: "https://thanos-querier-openshift-monitoring.apps.your-cluster.example.com/api/v1/query"
+
+  # ---------------------------------------------------------------------------
+  # Target microservice
+  # The Understanding Agent reads these fields and writes them to the
+  # governance_context MongoDB collection so all agents share a consistent view.
+  # ---------------------------------------------------------------------------
+  microserviceNamespace: "iotoccupancy"
+  microserviceDeployment: "iotoccupancy-sample-mosquitto"
+
+  # Number of replicas for Deployment-based components (autoscaler-agent, model-deployment)
+  size: 1
+
+  # ---------------------------------------------------------------------------
+  # CronJob schedules (all optional – defaults shown below)
+  # ---------------------------------------------------------------------------
+  # dataMonitoringSchedule: "*/1 * * * *"
+  # modelTrainingSchedule:  "*/30 * * * *"
+  # qaSchedule:             "*/5 * * * *"
+
+  # ---------------------------------------------------------------------------
+  # Microservice intent declaration
+  # The Understanding Agent extracts sla, modelRequirements and serverRequirements
+  # and surfaces them in governance_context for Planning and Perception agents.
+  # ---------------------------------------------------------------------------
+  microservices:
+    - name: mosquitto
+      sla:
+        # Conservative → agent prefers slightly more replicas when uncertain
+        # Normal       → balanced; BestEffort → tight packing
+        strategy: Conservative
+      modelRequirements:
+        # proactive → predict ahead of load; reactive → scale after load spike
+        scalingStrategy: proactive
+      serverRequirements:
+        serverType: apache
+        startupOptimization: true
+        scalingType: horizontal
+        # Prometheus job name used by the Perception agent to query Thanos
+        customMetrics: mqtt-load-tester-metrics

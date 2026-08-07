@@ -1,0 +1,147 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: masautoscalings.scaling.masa.com
+spec:
+  group: scaling.masa.com
+  names:
+    kind: MSAgenticScaling
+    listKind: MSAgenticScalingList
+    plural: masautoscalings
+    singular: masautoscaling
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: MSAgenticScaling is the Schema for the masautoscalings API
+        properties:
+          apiVersion:
+            description: 'APIVersion defines the versioned schema of this representation
+              of an object. Servers should convert recognized schemas to the latest
+              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+            type: string
+          kind:
+            description: 'Kind is a string value representing the REST resource this
+              object represents. Servers may infer this from the endpoint the client
+              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: Spec defines the desired state of MSAgenticScaling
+            type: object
+            required:
+              - microservices
+            properties:
+              thanosUrl:
+                type: string
+                description: >
+                  Full Thanos Querier query URL. When set, bypasses auto-discovery.
+                  Example: https://thanos-querier.openshift-monitoring.svc:9091/api/v1/query
+              microserviceNamespace:
+                type: string
+                description: Kubernetes namespace that contains the target microservice Deployment.
+              microserviceDeployment:
+                type: string
+                description: Name of the target microservice Deployment to monitor and scale.
+              size:
+                type: integer
+                description: >
+                  Number of replicas for Deployment-based components
+                  (autoscaler-agent, model-deployment, quality-assurance).
+                default: 1
+                minimum: 1
+              dataMonitoringSchedule:
+                type: string
+                description: >
+                  Cron expression for the data-monitoring CronJob.
+                  Defaults to every minute: */1 * * * *
+              modelTrainingSchedule:
+                type: string
+                description: >
+                  Cron expression for the model-development CronJob.
+                  Defaults to every 30 minutes: */30 * * * *
+              qaSchedule:
+                type: string
+                description: >
+                  Cron expression for the quality-assurance CronJob.
+                  Defaults to every 5 minutes: */5 * * * *
+              microservices:
+                description: List of microservices to monitor
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                      description: Microservice Name
+                    sla:
+                      description: SLA (Service Level Agreement) Requirements
+                      type: object
+                      required:
+                        - strategy
+                      properties:
+                        strategy:
+                          type: string
+                          description: Declares the type of strategy we want to addopt
+                          enum: 
+                            - 'Conservative'
+                            - 'Normal'
+                            - 'BestEffort'
+                          default: 'Conservative'
+                    modelRequirements:
+                      description: Autoscaling Model requirements
+                      type: object
+                      required:
+                        - scalingStrategy
+                      properties:
+                        scalingStrategy:
+                          type: string
+                          description: Scaling Strategy to be used, reactive/proactive/any
+                          enum: 
+                            - 'proactive'
+                            - 'reactive'
+                            - 'any'
+                          default: 'any'                      
+                    serverRequirements:
+                      description: MicroService specific requirements
+                      type: object
+                      required:
+                        - serverType
+                        - startupOptimization
+                      properties:
+                        serverType:
+                          type: string
+                          description: Declares the top level domain that will be used for configuring all Routes in this deployment
+                          enum: 
+                            - 'liberty'
+                            - 'gunicorn'
+                            - 'apache'
+                            - 'nodejs'
+                            - 'tomcat'
+                        startupOptimization:
+                          type: boolean
+                          description: Whether we should apply built-in startup optimization configuration
+                        scalingType:
+                          type: string
+                          description: MicroService can scale either vertically, horizontally or both.
+                          enum: 
+                            - 'horizontal'
+                            - 'vertical'
+                            - 'any'
+                          default: 'any'                      
+                        customMetrics:
+                          type: string
+                          description: ID of the metric to be used by prometheus
+            x-kubernetes-preserve-unknown-fields: true
+          status:
+            description: Status defines the observed state of MSAgenticScaling
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

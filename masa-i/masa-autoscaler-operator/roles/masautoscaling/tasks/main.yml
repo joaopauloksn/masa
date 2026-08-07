@@ -1,0 +1,497 @@
+---
+# ---------------------------------------------------------------------------
+# Thanos URL auto-discovery
+# ---------------------------------------------------------------------------
+# If thanos_url is not provided in the CR spec we query the OpenShift route
+# to build it automatically. Set spec.thanosUrl in the CR to bypass this step.
+
+- name: Auto-discover Thanos route when thanosUrl is not set
+  when: thanos_url is not defined or thanos_url == ""
+  block:
+    - name: Get Thanos Querier route
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        namespace: openshift-monitoring
+        label_selectors:
+          - "app.kubernetes.io/name=thanos-querier"
+      register: thanos_route_info
+      ignore_errors: true
+
+    - name: Set thanos_url from discovered route
+      set_fact:
+        thanos_url: "https://{{ thanos_route_info.resources[0].spec.host }}/api/v1/query"
+      when:
+        - thanos_route_info.resources is defined
+        - thanos_route_info.resources | length > 0
+
+    - name: Fall back to in-cluster Thanos service URL when route not found
+      set_fact:
+        # In-cluster address – no external route needed, lower latency, avoids TLS SNI issues.
+        # Port 9091 requires cluster-monitoring-view ClusterRole on the ServiceAccount.
+        thanos_url: "https://thanos-querier.openshift-monitoring.svc:9091/api/v1/query"
+      when: thanos_url is not defined or thanos_url == ""
+
+- name: Log resolved Thanos URL
+  debug:
+    msg: "Using Thanos URL: {{ thanos_url }}"
+
+# ---------------------------------------------------------------------------
+# understanding-agent CronJob  (runs every minute, reads CR → writes governance_context)
+# ---------------------------------------------------------------------------
+
+- name: Deploying understanding-agent CronJob
+  kubernetes.core.k8s:
+    definition:
+      kind: CronJob
+      apiVersion: batch/v1
+      metadata:
+        name: '{{ ansible_operator_meta.name }}-understanding-agent'
+        namespace: '{{ ansible_operator_meta.namespace }}'
+      spec:
+        # Re-read the CR spec every minute so governance_context stays current.
+        schedule: "*/1 * * * *"
+        concurrencyPolicy: Forbid
+        successfulJobsHistoryLimit: 3
+        failedJobsHistoryLimit: 3
+        jobTemplate:
+          spec:
+            template:
+              metadata:
+                labels:
+                  app: masa-understanding-agent
+              spec:
+                serviceAccountName: controller-manager
+                restartPolicy: OnFailure
+                containers:
+                - name: masa-understanding-agent
+                  image: "jpksn/masa-agent-understanding:1.0.0"   # masa-agent-understanding/docker
+                  imagePullPolicy: Always
+                  env:
+                    - name: OPERATOR_NAMESPACE
+                      value: '{{ ansible_operator_meta.namespace }}'
+                    - name: CR_NAME
+                      value: '{{ ansible_operator_meta.name }}'
+                    - name: MONGO_HOST
+                      value: "mas-mongo-ce-0.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017,mas-mongo-ce-1.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017,mas-mongo-ce-2.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017"
+                    - name: MONGO_TLS
+                      value: "true"
+                    - name: MONGO_TLS_INSECURE
+                      value: "true"
+                    - name: MONGO_SECRET_DIR
+                      value: "/etc/secrets/mongo"
+                  volumeMounts:
+                    - name: mongo-credentials
+                      mountPath: /etc/secrets/mongo
+                      readOnly: true
+                volumes:
+                  - name: mongo-credentials
+                    secret:
+                      secretName: mongo-credentials
+
+# ---------------------------------------------------------------------------
+# Persistent storage for ML model artefacts
+# ---------------------------------------------------------------------------
+
+- name: Create PVC for model storage
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: model-pvc
+        namespace: '{{ ansible_operator_meta.namespace }}'
+      spec:
+        accessModes:
+          - ReadWriteMany
+        resources:
+          requests:
+            storage: 500Mi
+        storageClassName: ocs-storagecluster-cephfs
+        volumeMode: Filesystem
+
+# ---------------------------------------------------------------------------
+# perception-agent CronJob (runs every minute, concurrencyPolicy: Forbid)
+# ---------------------------------------------------------------------------
+
+- name: Deploying perception-agent CronJob
+  kubernetes.core.k8s:
+    definition:
+      kind: CronJob
+      apiVersion: batch/v1
+      metadata:
+        name: '{{ ansible_operator_meta.name }}-perception-agent'
+        namespace: '{{ ansible_operator_meta.namespace }}'
+      spec:
+        # Collect metrics every minute. Adjust to match your desired granularity.
+        schedule: "{{ data_monitoring_schedule | default('*/1 * * * *') }}"
+        # Never run two collection jobs at the same time.
+        concurrencyPolicy: Forbid
+        successfulJobsHistoryLimit: 3
+        failedJobsHistoryLimit: 5
+        jobTemplate:
+          spec:
+            template:
+              metadata:
+                labels:
+                  app: masa-agent-perception
+              spec:
+                serviceAccountName: controller-manager
+                # On failure let the CronJob retry on the next scheduled tick rather
+                # than spinning in a crash-loop inside the same Job.
+                restartPolicy: OnFailure
+                containers:
+                - name: masa-agent-perception
+                  image: "jpksn/masa-agent-perception:1.0.0"      # masa-agent-perception/docker
+                  imagePullPolicy: Always
+                  env:
+                    - name: MONGO_HOST
+                      value: "mas-mongo-ce-0.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017,mas-mongo-ce-1.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017,mas-mongo-ce-2.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017"
+                    - name: MONGO_TLS
+                      value: "true"
+                    - name: MONGO_TLS_INSECURE
+                      value: "true"
+                    - name: MONGO_SECRET_DIR
+                      value: "/etc/secrets/mongo"
+                    - name: THANOS_SECRET_DIR
+                      value: "/etc/secrets/thanos"
+                    - name: THANOS_URL
+                      value: "{{ thanos_url }}"
+                    - name: NAMESPACE
+                      value: "{{ microservice_namespace | default(ansible_operator_meta.namespace) }}"
+                    - name: DEPLOYMENT
+                      value: "{{ microservice_deployment | default('iotoccupancy-sample-mosquitto') }}"
+                    - name: T_QUANTILE
+                      value: "{{ target_quantile | default('0.5') }}"
+                    - name: T_MESSAGE_DELIVERED_PERCENTAGE
+                      value: "{{ target_message_delivered_percentage | default('95') }}"
+                  volumeMounts:
+                    - name: mongo-credentials
+                      mountPath: /etc/secrets/mongo
+                      readOnly: true
+                    - name: thanos-token
+                      mountPath: /etc/secrets/thanos
+                      readOnly: true
+                volumes:
+                  - name: mongo-credentials
+                    secret:
+                      secretName: mongo-credentials
+                  - name: thanos-token
+                    projected:
+                      sources:
+                        - serviceAccountToken:
+                            path: token
+                            expirationSeconds: 3600
+                            audience: openshift
+
+# ---------------------------------------------------------------------------
+# autoscaler-agent deployment
+# ---------------------------------------------------------------------------
+
+- name: Deploying action-agent
+  kubernetes.core.k8s:
+    definition:
+      kind: Deployment
+      apiVersion: apps/v1
+      metadata:
+        name: '{{ ansible_operator_meta.name }}-action-agent'
+        namespace: '{{ ansible_operator_meta.namespace }}'
+      spec:
+        replicas: "{{ size }}"
+        selector:
+          matchLabels:
+            app: masa-agent-action
+        template:
+          metadata:
+            labels:
+              app: masa-agent-action
+          spec:
+            serviceAccountName: controller-manager
+            containers:
+            - name: masa-agent-action
+              image: "jpksn/masa-agent-action:1.0.0"              # masa-agent-action/docker
+              imagePullPolicy: Always
+              env:
+                - name: NAMESPACE
+                  value: "{{ microservice_namespace | default(ansible_operator_meta.namespace) }}"
+                - name: DEPLOYMENT_NAME
+                  value: "{{ microservice_deployment | default('iotoccupancy-sample-mosquitto') }}"
+                - name: MONGO_HOST
+                  value: "mas-mongo-ce-0.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017,mas-mongo-ce-1.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017,mas-mongo-ce-2.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017"
+                - name: MONGO_TLS
+                  value: "true"
+                - name: MONGO_TLS_INSECURE
+                  value: "true"
+                - name: MONGO_SECRET_DIR
+                  value: "/etc/secrets/mongo"
+                # How many seconds to wait between polls when no plan is pending
+                - name: POLL_INTERVAL_SECONDS
+                  value: "10"
+                # Hard limits on replica count (safety clamp)
+                - name: MIN_REPLICAS
+                  value: "1"
+                - name: MAX_REPLICAS
+                  value: "20"
+              volumeMounts:
+                - name: mongo-credentials
+                  mountPath: /etc/secrets/mongo
+                  readOnly: true
+            volumes:
+              - name: mongo-credentials
+                secret:
+                  secretName: mongo-credentials
+
+# ---------------------------------------------------------------------------
+# planning-training CronJob (runs every 30 minutes, concurrencyPolicy: Forbid)
+# ---------------------------------------------------------------------------
+
+- name: Deploying planning-training CronJob
+  kubernetes.core.k8s:
+    definition:
+      kind: CronJob
+      apiVersion: batch/v1
+      metadata:
+        name: '{{ ansible_operator_meta.name }}-planning-training'
+        namespace: '{{ ansible_operator_meta.namespace }}'
+      spec:
+        # Retrain every 30 minutes. Adjust via spec.modelTrainingSchedule in the CR.
+        schedule: "{{ model_training_schedule | default('*/30 * * * *') }}"
+        # Never run two training jobs simultaneously – training is CPU/memory intensive.
+        concurrencyPolicy: Forbid
+        successfulJobsHistoryLimit: 5
+        failedJobsHistoryLimit: 3
+        jobTemplate:
+          spec:
+            template:
+              metadata:
+                labels:
+                  app: masa-agent-planning-training
+              spec:
+                serviceAccountName: controller-manager
+                # Never auto-restart a failed training job mid-run.
+                # Let it fail cleanly and wait for the next scheduled tick.
+                restartPolicy: Never
+                containers:
+                - name: masa-agent-planning-training
+                  image: "jpksn/masa-agent-planning-training:1.0.0"  # masa-agent-planning/docker-training
+                  imagePullPolicy: Always
+                  env:
+                    - name: MONGO_HOST
+                      value: "mas-mongo-ce-0.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017,mas-mongo-ce-1.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017,mas-mongo-ce-2.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017"
+                    - name: MONGO_TLS
+                      value: "true"
+                    - name: MONGO_TLS_INSECURE
+                      value: "true"
+                    - name: MONGO_SECRET_DIR
+                      value: "/etc/secrets/mongo"
+                    - name: MODEL_PATH
+                      value: "/mnt/model/best_replica_predictor_model.h5"
+                    - name: BEST_MSE_FILE
+                      value: "/mnt/model/best_mse.txt"
+                  volumeMounts:
+                    - name: model-pv
+                      mountPath: /mnt/model
+                    - name: mongo-credentials
+                      mountPath: /etc/secrets/mongo
+                      readOnly: true
+                volumes:
+                  - name: model-pv
+                    persistentVolumeClaim:
+                      claimName: model-pvc
+                  - name: mongo-credentials
+                    secret:
+                      secretName: mongo-credentials
+
+# ---------------------------------------------------------------------------
+# planning-agent Deployment
+# ---------------------------------------------------------------------------
+
+- name: Deploying planning-agent
+  kubernetes.core.k8s:
+    definition:
+      kind: Deployment
+      apiVersion: apps/v1
+      metadata:
+        name: '{{ ansible_operator_meta.name }}-planning-agent'
+        namespace: '{{ ansible_operator_meta.namespace }}'
+      spec:
+        replicas: "{{ size }}"
+        selector:
+          matchLabels:
+            app: masa-agent-planning
+        template:
+          metadata:
+            labels:
+              app: masa-agent-planning
+          spec:
+            serviceAccountName: controller-manager
+            containers:
+            - name: masa-agent-planning
+              image: "jpksn/masa-agent-planning:1.0.0"            # masa-agent-planning/docker
+              imagePullPolicy: Always
+              env:
+                - name: MONGO_HOST
+                  value: "mas-mongo-ce-0.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017,mas-mongo-ce-1.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017,mas-mongo-ce-2.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017"
+                - name: MONGO_TLS
+                  value: "true"
+                - name: MONGO_TLS_INSECURE
+                  value: "true"
+                - name: MONGO_SECRET_DIR
+                  value: "/etc/secrets/mongo"
+                - name: MODEL_PATH
+                  value: "/mnt/model/best_replica_predictor_model.h5"
+                - name: SCALER_FILE
+                  value: "/mnt/model/scaler.json"
+                - name: DEPLOYMENT_NAME
+                  value: "{{ microservice_deployment | default('iotoccupancy-sample-mosquitto') }}"
+                - name: NAMESPACE
+                  value: "{{ microservice_namespace | default(ansible_operator_meta.namespace) }}"
+                # Prediction loop interval (seconds). governance_context takes precedence
+                # for deployment/namespace; env vars are the fallback.
+                - name: PREDICT_INTERVAL_SECONDS
+                  value: "30"
+              volumeMounts:
+                - name: model-pv
+                  mountPath: /mnt/model
+                - name: mongo-credentials
+                  mountPath: /etc/secrets/mongo
+                  readOnly: true
+            volumes:
+              - name: model-pv
+                persistentVolumeClaim:
+                  claimName: model-pvc
+              - name: mongo-credentials
+                secret:
+                  secretName: mongo-credentials
+
+# ---------------------------------------------------------------------------
+# reflection-agent CronJob (runs every 5 minutes, concurrencyPolicy: Forbid)
+# ---------------------------------------------------------------------------
+
+- name: Deploying reflection-agent CronJob
+  kubernetes.core.k8s:
+    definition:
+      kind: CronJob
+      apiVersion: batch/v1
+      metadata:
+        name: '{{ ansible_operator_meta.name }}-reflection-agent'
+        namespace: '{{ ansible_operator_meta.namespace }}'
+      spec:
+        # Evaluate autoscaler quality every 5 minutes.
+        schedule: "{{ qa_schedule | default('*/5 * * * *') }}"
+        concurrencyPolicy: Forbid
+        successfulJobsHistoryLimit: 3
+        failedJobsHistoryLimit: 3
+        jobTemplate:
+          spec:
+            template:
+              metadata:
+                labels:
+                  app: masa-agent-reflection
+              spec:
+                serviceAccountName: controller-manager
+                restartPolicy: OnFailure
+                containers:
+                - name: masa-agent-reflection
+                  image: "jpksn/masa-agent-reflection:1.0.0"      # masa-agent-reflection/docker
+                  imagePullPolicy: Always
+                  ports:
+                    - containerPort: 8000
+                      name: metrics
+                      protocol: TCP
+                  env:
+                    - name: NAMESPACE
+                      value: "{{ microservice_namespace | default(ansible_operator_meta.namespace) }}"
+                    - name: DEPLOYMENT_NAME
+                      value: "{{ microservice_deployment | default('iotoccupancy-sample-mosquitto') }}"
+                    - name: MONGO_HOST
+                      value: "mas-mongo-ce-0.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017,mas-mongo-ce-1.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017,mas-mongo-ce-2.mas-mongo-ce-svc.mongoce.svc.cluster.local:27017"
+                    - name: MONGO_TLS
+                      value: "true"
+                    - name: MONGO_TLS_INSECURE
+                      value: "true"
+                    - name: MONGO_SECRET_DIR
+                      value: "/etc/secrets/mongo"
+                    - name: MODEL_PATH
+                      value: "/mnt/model/best_replica_predictor_model.h5"
+                    - name: SCALER_FILE
+                      value: "/mnt/model/scaler.json"
+                    - name: BEST_MSE_FILE
+                      value: "/mnt/model/best_mse.txt"
+                    - name: QA_STATE_FILE
+                      value: "/mnt/model/qa_state.json"
+                    - name: METRICS_PORT
+                      value: "8000"
+                    # How long (seconds) to keep the metrics HTTP server alive after evaluation
+                    # so Prometheus has time to scrape before the pod exits.
+                    - name: METRICS_HOLD_SECONDS
+                      value: "30"
+                  volumeMounts:
+                    - name: model-pv
+                      mountPath: /mnt/model
+                    - name: mongo-credentials
+                      mountPath: /etc/secrets/mongo
+                      readOnly: true
+                volumes:
+                  - name: model-pv
+                    persistentVolumeClaim:
+                      claimName: model-pvc
+                  - name: mongo-credentials
+                    secret:
+                      secretName: mongo-credentials
+
+# ---------------------------------------------------------------------------
+# reflection-agent metrics Service (allows Prometheus to scrape the CronJob pod)
+# ---------------------------------------------------------------------------
+
+- name: Create reflection-agent metrics Service
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: '{{ ansible_operator_meta.name }}-reflection-agent-metrics'
+        namespace: '{{ ansible_operator_meta.namespace }}'
+        labels:
+          app: masa-agent-reflection
+      spec:
+        selector:
+          app: masa-agent-reflection
+        ports:
+          - name: metrics
+            port: 8000
+            targetPort: 8000
+            protocol: TCP
+
+# ---------------------------------------------------------------------------
+# ServiceMonitor – lets the cluster Prometheus scrape reflection-agent metrics
+# (requires the prometheus-operator CRD to be installed in the cluster)
+# ---------------------------------------------------------------------------
+
+- name: Create reflection-agent ServiceMonitor
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: monitoring.coreos.com/v1
+      kind: ServiceMonitor
+      metadata:
+        name: '{{ ansible_operator_meta.name }}-reflection-agent'
+        namespace: '{{ ansible_operator_meta.namespace }}'
+        labels:
+          app: masa-agent-reflection
+          # Standard label used by the OpenShift / cluster-monitoring stack to
+          # pick up ServiceMonitors in non-openshift namespaces.
+          openshift.io/cluster-monitoring: "true"
+      spec:
+        selector:
+          matchLabels:
+            app: masa-agent-reflection
+        endpoints:
+          - port: metrics
+            interval: 60s
+            # QA pod exits after METRICS_HOLD_SECONDS (30 s default).
+            # A short scrape interval would miss the window, so we scrape
+            # 10 s after the job starts to capture at least one sample.
+            scrapeTimeout: 25s
+        namespaceSelector:
+          matchNames:
+            - '{{ ansible_operator_meta.namespace }}'
