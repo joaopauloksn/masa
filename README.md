@@ -27,7 +27,7 @@ ginga/                          ← repository root
 
 ## What is MASA?
 
-`masa-i/` implements the MASA architecture — an **agentic multi-agent environment** where six specialised agents collaborate to observe, learn, plan, act and reflect on scaling decisions for a target microservice. Each agent has a single well-defined responsibility and communicates with others exclusively through **MongoDB collections** (no direct inter-agent API calls).
+`masa-i/` implements the MASA architecture — an **agentic multi-agent environment** where five specialised agents collaborate to observe, learn, plan, act and reflect on scaling decisions for a target microservice. Each agent has a single well-defined responsibility and communicates with others exclusively through **MongoDB collections** (no direct inter-agent API calls).
 
 A **Kubernetes Operator** (`MSAgenticScaling` CRD) deploys and manages all agents as CronJobs and Deployments.
 
@@ -39,8 +39,7 @@ A **Kubernetes Operator** (`MSAgenticScaling` CRD) deploys and manages all agent
 |---|---|---|---|
 | **Understanding** | [`masa-agent-understanding/`](./masa-i/masa-agent-understanding/) | Reads the `MSAgenticScaling` CR → writes `governance_context` to MongoDB | CronJob |
 | **Perception** | [`masa-agent-perception/`](./masa-i/masa-agent-perception/) | Queries Thanos/Prometheus → writes time-series metrics to MongoDB | CronJob |
-| **Planning — Training** | [`masa-agent-planning/docker-training/`](./masa-i/masa-agent-planning/) | Trains a neural network on historical metrics → saves model to shared PVC | CronJob |
-| **Planning — Prediction** | [`masa-agent-planning/docker/`](./masa-i/masa-agent-planning/) | Loads model → predicts replica count → writes scaling plan to MongoDB | Deployment |
+| **Planning** | [`masa-agent-planning/`](./masa-i/masa-agent-planning/) | Trains model (`docker-training/`) + predicts replica count and writes scaling plan (`docker/`) | CronJob + Deployment |
 | **Action** | [`masa-agent-action/`](./masa-i/masa-agent-action/) | Claims oldest pending scaling plan → patches Kubernetes Deployment replicas | Deployment |
 | **Reflection** | [`masa-agent-reflection/`](./masa-i/masa-agent-reflection/) | Evaluates post-scaling quality → writes `model_feedback` → triggers model reset if needed | CronJob |
 

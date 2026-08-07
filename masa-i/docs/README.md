@@ -78,7 +78,7 @@ kubectl apply -f masa-autoscaler-operator/config/samples/scaling_v1alpha1_masaut
 The operator will automatically:
 - Discover the Thanos Querier URL from the OpenShift route (or use `spec.thanosUrl` to override)
 - Create the shared model PVC
-- Deploy all 6 agents in the correct order
+- Deploy all 5 agents in the correct order
 
 ---
 
