@@ -1,4 +1,4 @@
-# MASA — Multi-Agent Scaling Architecture
+# MASA — Microservices Agentic Scaling Architecture
 
 MASA is a Kubernetes-native agentic autoscaler. A Kubernetes Operator deploys a set of specialised AI agents that collectively observe a target microservice, learn from its behaviour, and autonomously scale it to meet SLA objectives.
 

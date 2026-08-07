@@ -1,40 +1,66 @@
-# Ginga: Adaptive Microservices Autoscaling Framework
+# MASA: Microservices Agentic Scaling Architecture
 
-**Ginga** is an open‑source implementation of an adaptive, multi-agent architecture for autoscaling microservices in Kubernetes environments. It was developed as part of the master's dissertation *"An Adaptive Data‑Driven Architecture for Microservices Autoscaling"* by João Paulo Karol Santos Nunes (USP, 2025).
+**MASA** is an open-source implementation of an adaptive, multi-agent architecture for autoscaling microservices in Kubernetes environments. It was developed as part of the master's dissertation *"An Adaptive Data-Driven Architecture for Microservices Autoscaling"* by João Paulo Karol Santos Nunes (USP, 2025).
 
-> Ginga combines real‑time monitoring, machine‑learning predictions, and infrastructure awareness to scale microservices efficiently — reducing cloud costs and improving performance.
+> MASA combines real-time monitoring, machine-learning predictions, and infrastructure awareness to scale microservices efficiently — reducing cloud costs while meeting service-level objectives.
 
 ---
 
 ## Repository layout
 
 ```
-ginga/
-├── masa-i/          ← MASA: Multi-Agent Scaling Architecture (current implementation)
+ginga/                          ← repository root
+├── masa-i/                     ← MASA implementation (this project)
+│   ├── docs/                   ← full documentation
+│   ├── masa-autoscaler-operator/
+│   ├── masa-agent-understanding/
+│   ├── masa-agent-perception/
+│   ├── masa-agent-planning/
+│   ├── masa-agent-action/
+│   ├── masa-agent-reflection/
+│   └── masa-baseimage/
 ├── load-test-manage/
 └── load-test-py/
 ```
 
 ---
 
-## MASA — Multi-Agent Scaling Architecture
+## What is MASA?
 
-`masa-i/` is the current implementation. It replaces the original single-component architecture with a **multi-agent environment** where six specialised agents collaborate to observe, learn, plan, act and reflect on scaling decisions.
+`masa-i/` implements the MASA architecture — an **agentic multi-agent environment** where six specialised agents collaborate to observe, learn, plan, act and reflect on scaling decisions for a target microservice. Each agent has a single well-defined responsibility and communicates with others exclusively through **MongoDB collections** (no direct inter-agent API calls).
 
-### Agents at a glance
+A **Kubernetes Operator** (`MSAgenticScaling` CRD) deploys and manages all agents as CronJobs and Deployments.
 
-| Agent | Role | K8s type |
-|---|---|---|
-| **Understanding** | Reads the CR spec → writes `governance_context` to MongoDB | CronJob |
-| **Perception** | Queries Thanos/Prometheus → writes time-series metrics to MongoDB | CronJob |
-| **Planning — Training** | Trains a neural net on historical metrics → saves model to shared PVC | CronJob |
-| **Planning — Prediction** | Loads model → predicts replica count → writes scaling plan to MongoDB | Deployment |
-| **Action** | Claims oldest pending scaling plan → patches Kubernetes Deployment replicas | Deployment |
-| **Reflection** | Evaluates post-scaling quality → writes `model_feedback` → triggers model reset if needed | CronJob |
+---
 
-Agents communicate exclusively through **MongoDB collections** — no direct inter-agent API calls.
+## Agents
 
-### Quick start
+| Agent | Folder | Role | K8s type |
+|---|---|---|---|
+| **Understanding** | [`masa-agent-understanding/`](./masa-i/masa-agent-understanding/) | Reads the `MSAgenticScaling` CR → writes `governance_context` to MongoDB | CronJob |
+| **Perception** | [`masa-agent-perception/`](./masa-i/masa-agent-perception/) | Queries Thanos/Prometheus → writes time-series metrics to MongoDB | CronJob |
+| **Planning — Training** | [`masa-agent-planning/docker-training/`](./masa-i/masa-agent-planning/) | Trains a neural network on historical metrics → saves model to shared PVC | CronJob |
+| **Planning — Prediction** | [`masa-agent-planning/docker/`](./masa-i/masa-agent-planning/) | Loads model → predicts replica count → writes scaling plan to MongoDB | Deployment |
+| **Action** | [`masa-agent-action/`](./masa-i/masa-agent-action/) | Claims oldest pending scaling plan → patches Kubernetes Deployment replicas | Deployment |
+| **Reflection** | [`masa-agent-reflection/`](./masa-i/masa-agent-reflection/) | Evaluates post-scaling quality → writes `model_feedback` → triggers model reset if needed | CronJob |
+
+---
+
+## Documentation
+
+| Document | Description |
+|---|---|
+| [Architecture](./masa-i/docs/architecture.md) | Data-flow diagram, agent responsibilities, MongoDB collections, shared PVC files |
+| [Operator & CRD](./masa-i/docs/operator.md) | Installation, `MSAgenticScaling` CR spec reference, RBAC, Thanos auto-discovery |
+| [Agents](./masa-i/docs/agents.md) | Per-agent reference: env vars, volumes, SLA labels, plan status lifecycle |
+| [Secrets & Security](./masa-i/docs/secrets.md) | Credential management, projected ServiceAccount tokens, resolution order |
+| [Observability](./masa-i/docs/observability.md) | Prometheus metrics, ServiceMonitor config, alert rules, MongoDB audit trail |
+
+---
+
+## Quick start
+
+**Prerequisites:** OpenShift 4.x (or Kubernetes 1.24+), `prometheus-operator`, MAS MongoDB replica set, `ocs-storagecluster-cephfs` StorageClass.
 
 ```bash
 # 1. Create the MongoDB credentials secret
@@ -47,39 +73,29 @@ kubectl apply -f masa-i/masa-autoscaler-operator/config/crd/bases/scaling.masa.c
 cd masa-i/masa-autoscaler-operator
 make deploy IMG=jpksn/masa-operator:1.0.0
 
-# 4. Apply your custom resource
+# 4. Apply your custom resource (edit namespace/deployment name first)
 kubectl apply -f masa-i/masa-autoscaler-operator/config/samples/scaling_v1alpha1_masautoscaling.yaml
 ```
 
-The operator auto-discovers the Thanos Querier URL from the OpenShift route (or use `spec.thanosUrl` to override), creates the shared model PVC, and deploys all agents in the correct dependency order.
-
-### Documentation
-
-| Document | Description |
-|---|---|
-| [Architecture](./masa-i/docs/architecture.md) | Data-flow diagram, agent responsibilities, MongoDB collections, shared PVC files |
-| [Operator & CRD](./masa-i/docs/operator.md) | Installation, `MSAgenticScaling` CR spec reference, RBAC, Thanos auto-discovery |
-| [Agents](./masa-i/docs/agents.md) | Per-agent reference: env vars, volumes, SLA labels, plan status lifecycle |
-| [Secrets & Security](./masa-i/docs/secrets.md) | Credential management, projected ServiceAccount tokens, resolution order |
-| [Observability](./masa-i/docs/observability.md) | Prometheus metrics, ServiceMonitor config, alert rules, MongoDB audit trail |
+The operator will automatically discover the Thanos Querier URL from the OpenShift route (set `spec.thanosUrl` to override), create the shared model PVC, and deploy all agents in the correct dependency order. See [Operator & CRD](./masa-i/docs/operator.md) for the full CR spec reference.
 
 ---
 
-## Machine‑Learning Model
+## Machine Learning Model
 
-The planning agent trains a small neural network on real-world operational metrics labelled with service-level objectives (SLOs).
+The Planning agent trains a small neural network on real-world operational metrics labelled with service-level objectives (SLOs).
 
-- **Input:** total MQTT messages (delivered + undelivered), normalised
+- **Input:** total MQTT messages (delivered + undelivered), normalised by observed maximum
 - **Output:** recommended number of replicas
-- **Training data:** `label=2` rows from the `mongo_scaling.microservices` collection (observations where the current replica count was meeting the SLA)
-- **Retraining:** automatic, via the Planning-Training CronJob; a new model is saved to the shared PVC only when MSE improves
-- **Quality gate:** the Reflection agent monitors MAE drift and post-scaling SLA breaches; it deletes `best_mse.txt` to force unconditional retraining when quality degrades
+- **Training data:** `label=2` rows from `mongo_scaling.microservices` — observations where the current replica count was meeting the SLA
+- **Retraining:** automatic via the Planning-Training CronJob; a new model is written to the shared PVC only when MSE improves on the current best
+- **Quality gate:** the Reflection agent monitors rolling MAE and post-scaling SLA breaches; it deletes `best_mse.txt` to force unconditional retraining when quality degrades below threshold
 
 ---
 
 ## Evaluation Summary
 
-In an IoT case study (MQTT broker load), the adaptive autoscaler outperformed Kubernetes HPA:
+In an IoT case study (MQTT broker under variable load), MASA outperformed Kubernetes HPA:
 
 | Metric | Improvement |
 |---|---|
@@ -93,7 +109,7 @@ See Chapter 4 of the dissertation for full experiment details.
 
 ## Citation
 
-> Nunes, J. P. K. S. (2025). *An Adaptive Data‑Driven Architecture for Microservices Autoscaling*. Master's Dissertation – ICMC/USP.
+> Nunes, J. P. K. S. (2025). *An Adaptive Data-Driven Architecture for Microservices Autoscaling*. Master's Dissertation – ICMC/USP.
 
 ---
 

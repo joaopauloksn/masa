@@ -2,7 +2,7 @@
 
 ## Overview
 
-MASA uses a **multi-agent environment** pattern. Each agent has a single well-defined responsibility. Agents communicate exclusively through **MongoDB collections** — no direct inter-agent API calls exist. This decouples agents operationally: any agent can be restarted, redeployed or scaled independently.
+MASA uses an **agentic multi-agent environment** pattern. Each agent has a single well-defined responsibility. Agents communicate exclusively through **MongoDB collections** — no direct inter-agent API calls exist. This decouples agents operationally: any agent can be restarted, redeployed or scaled independently.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
