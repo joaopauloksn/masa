@@ -12,7 +12,7 @@ MASA uses an **agentic multi-agent environment** pattern. Each agent has a singl
                             │ reads spec
                             ▼
                  ┌─────────────────────┐
-                 │  Understanding      │  CronJob  */1 * * * *
+                 │  Understanding      │  Job (Event-driven)
                  │  Agent              │  masa-agent-understanding
                  └──────────┬──────────┘
                             │ upserts
