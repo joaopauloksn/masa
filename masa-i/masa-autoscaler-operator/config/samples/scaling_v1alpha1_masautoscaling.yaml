@@ -12,9 +12,10 @@ spec:
   # ---------------------------------------------------------------------------
   # Thanos / Prometheus URL
   # Optional — auto-discovered from the OpenShift route when omitted.
-  # Set this to bypass auto-discovery (local testing, restricted RBAC, etc.).
+  # Uncomment to bypass auto-discovery (useful when RBAC restricts route reads,
+  # or to point at an external Thanos Querier endpoint).
   # ---------------------------------------------------------------------------
-  # thanosUrl: "https://thanos-querier-openshift-monitoring.apps.your-cluster.example.com/api/v1/query"
+  # thanosUrl: "https://thanos-querier-openshift-monitoring.apps.idp91-m1.cp.fyre.ibm.com/api/v1/query"
 
   # ---------------------------------------------------------------------------
   # Target microservice
@@ -24,15 +25,39 @@ spec:
   microserviceNamespace: "iotoccupancy"
   microserviceDeployment: "iotoccupancy-sample-mosquitto"
 
-  # Number of replicas for Deployment-based components (autoscaler-agent, model-deployment)
+  # Number of replicas for Deployment-based components (action-agent, planning-agent)
   size: 1
 
   # ---------------------------------------------------------------------------
-  # CronJob schedules (all optional – defaults shown below)
   # ---------------------------------------------------------------------------
-  # dataMonitoringSchedule: "*/1 * * * *"
+  # Training toggle
+  # Set to true once you have enough data collected to start model training.
+  # When false (default) the training CronJob is suspended and never fires.
+  # ---------------------------------------------------------------------------
+  trainingEnabled: false
+
+  # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # CronJob schedules / intervals (all optional – defaults shown below)
+  # ---------------------------------------------------------------------------
+  # dataMonitoringInterval: 15        # seconds between perception cycles (default: 15)
   # modelTrainingSchedule:  "*/30 * * * *"
   # qaSchedule:             "*/5 * * * *"
+
+  # ---------------------------------------------------------------------------
+  # Replica safety clamp (optional – defaults shown)
+  # The action-agent will never scale the target below minReplicas or above maxReplicas.
+  # ---------------------------------------------------------------------------
+  # minReplicas: 1
+  # maxReplicas: 20
+
+  # ---------------------------------------------------------------------------
+  # Storage (all optional)
+  # storageClassName is auto-detected from the cluster (first RWX filesystem
+  # class found). Override here when auto-detection picks the wrong class.
+  # ---------------------------------------------------------------------------
+  # storageClassName: "ocs-storagecluster-cephfs"
+  # modelPvcSize: "500Mi"
 
   # ---------------------------------------------------------------------------
   # Microservice intent declaration
@@ -54,3 +79,12 @@ spec:
         scalingType: horizontal
         # Prometheus job name used by the Perception agent to query Thanos
         customMetrics: mqtt-load-tester-metrics
+
+  # ---------------------------------------------------------------------------
+  # SLA thresholds (passed to the perception agent)
+  # ---------------------------------------------------------------------------
+  # targetQuantile reflects what the service can realistically achieve under
+  # healthy load. mosquitto in this environment runs 0.45–0.97 s under load,
+  # so 0.2 s made label=2 structurally unreachable. 1.0 s is the realistic SLA.
+  targetQuantile: "1.0"
+  targetMessageDeliveredPercentage: "90"

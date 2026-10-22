@@ -1,4 +1,4 @@
-FROM jpksn/masa-baseimage:0.0.1
+FROM jpksn/masa-baseimage:1.0.1
 
 WORKDIR /app
 

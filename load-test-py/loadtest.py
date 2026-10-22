@@ -25,9 +25,15 @@ port = int(os.getenv("MQTT_PORT", 1883))
 username = os.getenv("MQTT_USERNAME", "")
 password = os.getenv("MQTT_PASSWORD", "")
 topic = os.getenv("MQTT_TOPIC", "default/topic")
-keepalive = int(os.getenv("MQTT_KEEPALIVE", 60))  # Keep-alive interval (seconds)
-max_inflight = int(os.getenv("MAX_INFLIGHT", 20))  # Max in-flight messages
-ack_timeout = int(os.getenv("ACK_TIMEOUT", 60))  # Timeout for waiting for confirmations (seconds)
+keepalive = int(os.getenv("MQTT_KEEPALIVE", 300))           # Keep-alive interval (seconds)
+max_inflight = int(os.getenv("MAX_INFLIGHT", 5))             # Max in-flight messages (QoS2 uses 4 packets each — keep low)
+ack_timeout = int(os.getenv("ACK_TIMEOUT", 60))              # Timeout for waiting for confirmations (seconds)
+# Periodic reconnect: force all clients to reconnect every N seconds so the
+# load balancer redistributes connections across all available mosquitto pods.
+# Default is 0 (disabled) — enabling this with many clients causes a thundering
+# herd on reconnect that overwhelms mosquitto's receive-maximum quota.
+# Only enable with a large value (e.g. 300) and few clients.
+periodic_reconnect_seconds = int(os.getenv("PERIODIC_RECONNECT_SECONDS", 0))
 
 logger.info(f"MQTT Broker Address: {broker_address}")
 logger.info(f"MQTT Port: {port}")
@@ -38,7 +44,7 @@ logger.info(f"Max Inflight Messages: {max_inflight}")
 logger.info(f"Acknowledgment Timeout: {ack_timeout} seconds")
 
 # Load load-testing parameters from environment variables and log them
-frequency = float(os.getenv("MQTT_MESSAGE_FREQUENCY", 1))  # Frequency in seconds
+frequency = float(os.getenv("MQTT_MESSAGE_FREQUENCY", 0.2))   # Frequency in seconds (5 msg/s per client)
 temperature_min = float(os.getenv("TEMPERATURE_MIN", 15))  # Minimum temperature (Celsius)
 temperature_max = float(os.getenv("TEMPERATURE_MAX", 30))  # Maximum temperature (Celsius)
 humidity_min = float(os.getenv("HUMIDITY_MIN", 30))  # Minimum humidity (%)
@@ -55,8 +61,8 @@ logger.info(f"Motion Range: {motion_min} - {motion_max}")
 logger.info(f"CO2 Range: {co2_min} - {co2_max} ppm")
 
 # Load additional parameters and log them
-num_clients = int(os.getenv("NUM_CLIENTS", 10))  # Number of clients
-use_qos = int(os.getenv("USE_QOS", 0))  # Use QoS level (0, 1, or 2)
+num_clients = int(os.getenv("NUM_CLIENTS", 500))    # Number of clients
+use_qos = int(os.getenv("USE_QOS", 2))              # Use QoS level (0, 1, or 2)
 payload_multiplier = int(os.getenv("PAYLOAD_MULTIPLIER", 1))  # Factor to increase payload size
 reconnect_interval = int(os.getenv("RECONNECT_INTERVAL", 10))  # Reconnect interval (seconds)
 
@@ -188,8 +194,24 @@ def run_client(client_id):
     client.connect(broker_address, port, keepalive=keepalive)
     client.loop_start()
 
+    connection_time = time.time()
+
     try:
         while True:
+            now = time.time()
+
+            # Periodic reconnect — forces the load balancer to redistribute this
+            # client to a (potentially different) mosquitto pod on each cycle.
+            if periodic_reconnect_seconds > 0 and (now - connection_time) >= periodic_reconnect_seconds:
+                logger.info(f"[Client {client_id}] Periodic reconnect after {periodic_reconnect_seconds}s.")
+                client.loop_stop()
+                client.disconnect()
+                time.sleep(random.uniform(0, 2))  # stagger reconnects to avoid thundering herd
+                client_userdata["connection_start_time"] = time.time()
+                client.connect(broker_address, port, keepalive=keepalive)
+                client.loop_start()
+                connection_time = time.time()
+
             # Check if the acknowledgment timeout has been reached
             if time.time() - last_ack_time > ack_timeout:
                 logger.error(f"Acknowledgment timeout reached ({ack_timeout} seconds). Restarting clients.")
@@ -197,6 +219,7 @@ def run_client(client_id):
                 client.disconnect()
                 time.sleep(reconnect_interval)
                 attempt_reconnect(client)
+                connection_time = time.time()
 
             # Simulate random client disconnections
             if random.random() < 0.001:  # 0.1% chance of reconnecting
@@ -204,6 +227,7 @@ def run_client(client_id):
                 client.disconnect()
                 time.sleep(reconnect_interval)
                 attempt_reconnect(client)
+                connection_time = time.time()
 
             # Generate and publish random sensor data
             message = generate_random_sensor_data()

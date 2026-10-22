@@ -1,0 +1,29 @@
+---
+# ClusterRoleBinding: keda-thanos-reader-monitoring-view
+#
+# Grants the keda-thanos-reader ServiceAccount (namespace: iotoccupancy) the
+# OpenShift built-in ClusterRole cluster-monitoring-view, which provides
+# read-only access to the Thanos Querier HTTP API endpoint
+# (https://thanos-querier.openshift-monitoring.svc:9091).
+#
+# The cluster-monitoring-view ClusterRole is maintained by OpenShift and
+# grants GET access to the /api/v1/query* and /api/v1/series routes exposed
+# by the in-cluster Thanos Querier.  No additional RBAC rules are required.
+#
+# This is a ClusterRoleBinding (not a RoleBinding) because cluster-monitoring-view
+# is a cluster-scoped role — it cannot be bound via a namespaced RoleBinding.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: keda-thanos-reader-monitoring-view
+  labels:
+    app.kubernetes.io/part-of: keda-hpa-baseline
+    app.kubernetes.io/component: auth
+subjects:
+  - kind: ServiceAccount
+    name: keda-thanos-reader
+    namespace: iotoccupancy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-monitoring-view

@@ -1,0 +1,28 @@
+---
+# Kustomize entry-point for the KEDA auth layer.
+#
+# Apply order:
+#   1. 01-serviceaccount.yaml  – ServiceAccount + long-lived token Secret
+#   2. 02-rbac.yaml            – ClusterRoleBinding → cluster-monitoring-view
+#   3. 03-trigger-auth.yaml    – TriggerAuthentication referencing the token
+#
+# The ServiceAccount and Secret must exist before the TriggerAuthentication is
+# applied, and the ClusterRoleBinding must be in place before KEDA attempts to
+# use the token to query Thanos.
+#
+# Usage (direct):
+#   oc apply -k ginga/hpa/auth/
+#
+# Usage via the top-level deploy script (recommended):
+#   ./ginga/hpa/scripts/deploy-keda-hpa.sh
+#
+# After applying, verify the token was populated:
+#   oc get secret keda-thanos-reader-token -n iotoccupancy \
+#     -o jsonpath='{.data.token}' | base64 -d | head -c 40
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - 01-serviceaccount.yaml
+  - 02-rbac.yaml
+  - 03-trigger-auth.yaml

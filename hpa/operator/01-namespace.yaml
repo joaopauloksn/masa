@@ -1,0 +1,12 @@
+---
+# Namespace for the Red Hat Custom Metrics Autoscaler (KEDA) Operator.
+# OLM installs the operator into this namespace; the KedaController
+# resource deployed in Sub-Task 2 step 4 also lives here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-keda
+  labels:
+    # Required so that OpenShift's OperatorHub / OLM machinery can manage
+    # resources in this namespace.
+    openshift.io/cluster-monitoring: "true"

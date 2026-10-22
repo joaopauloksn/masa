@@ -7,8 +7,8 @@ Each agent is a Docker image deployed by the MASA Operator. This document covers
 ## Understanding Agent
 
 **Folder:** `masa-agent-understanding/docker/`  
-**Image:** `jpksn/masa-agent-understanding:1.0.0`  
-**Type:** CronJob `*/1 * * * *`  
+**Image:** `jpksn/masa-agent-understanding:1.0.1`
+**Type:** Kubernetes `Job` (event-driven, triggered on CR creation or spec change)
 **Entry point:** `src/task.py`
 
 ### Responsibility
@@ -29,13 +29,13 @@ Reads the active `MSAgenticScaling` CR from the Kubernetes API and upserts a `go
 
 ## Perception Agent
 
-**Folder:** `masa-agent-perception/docker/`  
-**Image:** `jpksn/masa-agent-perception:1.0.0`  
-**Type:** CronJob `*/1 * * * *`, `concurrencyPolicy: Forbid`  
+**Folder:** `masa-agent-perception/docker/`
+**Image:** `jpksn/masa-agent-perception:1.0.1`
+**Type:** Deployment (long-running, samples every `MONITOR_INTERVAL_SECONDS`)
 **Entry point:** `src/task.py`
 
 ### Responsibility
-Queries Thanos/Prometheus for real-time MQTT broker metrics, computes an SLA label, and writes one time-series document to `mongo_scaling.microservices`.
+Queries Thanos/Prometheus for real-time MQTT broker metrics, computes an SLA label, and writes one time-series document to `mongo_scaling.microservices` on every cycle. Runs as a long-running Deployment (not a CronJob) to enable sub-minute sampling intervals and a tighter feedback loop.
 
 ### SLA labels
 | Label | Meaning |
@@ -56,6 +56,7 @@ Queries Thanos/Prometheus for real-time MQTT broker metrics, computes an SLA lab
 | `DEPLOYMENT` | ❌ | — | Target Deployment name |
 | `T_QUANTILE` | ❌ | `0.5` | Target latency quantile threshold (seconds) |
 | `T_MESSAGE_DELIVERED_PERCENTAGE` | ❌ | `95` | Target delivery percentage |
+| `MONITOR_INTERVAL_SECONDS` | ❌ | `15` | Seconds between collection cycles; set via `spec.dataMonitoringInterval` in the CR |
 
 ### Volumes
 - `/etc/secrets/mongo` — Secret `mongo-credentials` (username, password)
@@ -65,10 +66,12 @@ Queries Thanos/Prometheus for real-time MQTT broker metrics, computes an SLA lab
 
 ## Planning Agent — Training
 
-**Folder:** `masa-agent-planning/docker-training/`  
-**Image:** `jpksn/masa-agent-planning-training:1.0.0`  
-**Type:** CronJob `*/30 * * * *`, `concurrencyPolicy: Forbid`, `restartPolicy: Never`  
+**Folder:** `masa-agent-planning/docker-training/`
+**Image:** `jpksn/masa-agent-planning-training:1.0.1`
+**Type:** CronJob `*/30 * * * *`, `concurrencyPolicy: Forbid`, `restartPolicy: Never`
 **Entry point:** `src/task.py`
+
+> **Note:** This CronJob is **suspended by default** (`spec.trainingEnabled: false`). It will not fire until you explicitly enable training. See the [Training workflow](./operator.md#training-workflow) section.
 
 ### Responsibility
 Reads `label=2` rows from `mongo_scaling.microservices`, trains a small neural network (`total_messages → replica_count`), and saves the model to the shared PVC only when MSE improves.
@@ -96,7 +99,7 @@ Reads `label=2` rows from `mongo_scaling.microservices`, trains a small neural n
 ## Planning Agent — Prediction
 
 **Folder:** `masa-agent-planning/docker/`  
-**Image:** `jpksn/masa-agent-planning:1.0.0`  
+**Image:** `jpksn/masa-agent-planning:1.0.1`  
 **Type:** Deployment (long-running)  
 **Entry point:** `src/task.py`
 
@@ -117,6 +120,7 @@ Loads the trained model, reads the latest metrics row from MongoDB, predicts the
 | `DEPLOYMENT_NAME` | ❌ | `default-deployment` | Fallback target deployment name |
 | `NAMESPACE` | ❌ | `default-namespace` | Fallback target namespace |
 | `PREDICT_INTERVAL_SECONDS` | ❌ | `30` | Seconds between prediction cycles |
+| `IDLE_TOTAL_MSG_THRESHOLD` | ❌ | `1.0` | Throughput threshold (msgs/sec) below which system is considered idle and predicts 1 replica |
 
 ### PVC files read
 - `best_replica_predictor_model.h5`
@@ -127,7 +131,7 @@ Loads the trained model, reads the latest metrics row from MongoDB, predicts the
 ## Action Agent
 
 **Folder:** `masa-agent-action/docker/`  
-**Image:** `jpksn/masa-agent-action:1.0.0`  
+**Image:** `jpksn/masa-agent-action:1.0.1`  
 **Type:** Deployment (long-running)  
 **Entry point:** `src/task.py`
 
@@ -158,7 +162,7 @@ pending  →  applying  →  applied   (success)
 ## Reflection Agent
 
 **Folder:** `masa-agent-reflection/docker/`  
-**Image:** `jpksn/masa-agent-reflection:1.0.0`  
+**Image:** `jpksn/masa-agent-reflection:1.0.1`  
 **Type:** CronJob `*/5 * * * *`  
 **Entry point:** `docker/task.py`
 

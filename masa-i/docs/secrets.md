@@ -60,7 +60,7 @@ volumes:
         - serviceAccountToken:
             path: token
             expirationSeconds: 3600   # auto-rotated every hour by kubelet
-            audience: openshift
+            audience: https://kubernetes.default.svc
 ```
 
 The kubelet automatically rotates the file at `/etc/secrets/thanos/token` before expiry. The Perception Agent reads the file on every request, so it always uses a fresh token.

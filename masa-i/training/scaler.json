@@ -1,0 +1,11 @@
+{
+  "max_total_msg": 4985.073621701746,
+  "latency_cap": 2.0,
+  "max_undelivered": 933.0099690261017,
+  "features": [
+    "total_msg",
+    "pct_delivered_norm",
+    "latency_ratio",
+    "undelivered_norm"
+  ]
+}

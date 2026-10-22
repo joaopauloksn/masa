@@ -53,11 +53,20 @@ spec:
                   (autoscaler-agent, model-deployment, quality-assurance).
                 default: 1
                 minimum: 1
-              dataMonitoringSchedule:
-                type: string
+              dataMonitoringInterval:
+                type: integer
                 description: >
-                  Cron expression for the data-monitoring CronJob.
-                  Defaults to every minute: */1 * * * *
+                  Seconds between perception-agent collection cycles.
+                  Defaults to 15 seconds.
+                default: 15
+                minimum: 5
+              trainingEnabled:
+                type: boolean
+                description: >
+                  When false (default), the model-training CronJob is suspended.
+                  Set to true once enough data has been collected via the perception
+                  agent to start training the model.
+                default: false
               modelTrainingSchedule:
                 type: string
                 description: >
@@ -68,6 +77,17 @@ spec:
                 description: >
                   Cron expression for the quality-assurance CronJob.
                   Defaults to every 5 minutes: */5 * * * *
+              storageClassName:
+                type: string
+                description: >
+                  StorageClass to use for the model PVC (must support ReadWriteMany / Filesystem).
+                  When omitted, the operator auto-detects a suitable class from the cluster;
+                  if none is found the cluster-default StorageClass is used.
+              modelPvcSize:
+                type: string
+                description: >
+                  Storage size for the model PVC. Defaults to 500Mi.
+                  Example: 1Gi
               microservices:
                 description: List of microservices to monitor
                 type: array

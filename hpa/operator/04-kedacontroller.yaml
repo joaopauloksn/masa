@@ -1,0 +1,40 @@
+---
+# KedaController custom resource — instantiates the KEDA engine.
+#
+# The operator installed by the Subscription (03-subscription.yaml) watches for
+# exactly ONE KedaController named `keda` in the `openshift-keda` namespace.
+# Creating this resource causes the operator to:
+#   • Deploy the keda-operator (controller) pod.
+#   • Deploy the keda-metrics-apiserver pod (exposes the External Metrics API
+#     consumed by the native Kubernetes HPA).
+#   • Register the `external.metrics.k8s.io` APIService pointing at the adapter.
+#
+# Tuning notes:
+#   watchNamespace: ""         → watch all namespaces (needed for iotoccupancy)
+#   metricsServer.logLevel:    → set to "1" for production; "4" or "5" for debug
+#   operator.logLevel:         → same
+#   resourcesKeda defaults are kept so the operator can set appropriate requests/
+#   limits for the current OpenShift minor release.
+#
+# Verify readiness:
+#   oc get keda keda -n openshift-keda -o jsonpath='{.status.conditions}'
+#   oc get pods -n openshift-keda
+apiVersion: keda.sh/v1alpha1
+kind: KedaController
+metadata:
+  name: keda
+  namespace: openshift-keda
+spec:
+  # --- Operator pod settings ---
+  operator:
+    logLevel: "1"      # Verbosity level for the keda-operator pod (1 = Info)
+    logEncoder: console
+
+  # --- Metrics server (adapter) pod settings ---
+  metricsServer:
+    logLevel: "0"      # 0 = Errors only; increase to "4" while debugging
+
+  # --- Scope ---
+  # Empty string means cluster-wide.  Restrict to a comma-separated list of
+  # namespaces (e.g. "iotoccupancy") in environments with strict isolation.
+  watchNamespace: ""

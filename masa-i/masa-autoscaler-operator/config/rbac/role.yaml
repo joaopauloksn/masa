@@ -29,6 +29,7 @@ rules:
       - apps
     resources:
       - deployments
+      - deployments/scale
       - daemonsets
       - replicasets
       - statefulsets
@@ -57,15 +58,19 @@ rules:
       - update
       - watch
   ##
-  ## OpenShift Routes – needed for Thanos URL auto-discovery
+  ## OpenShift Routes – needed for Thanos URL auto-discovery and dashboard Route
   ##
   - apiGroups:
       - route.openshift.io
     resources:
       - routes
     verbs:
+      - create
+      - delete
       - get
       - list
+      - patch
+      - update
       - watch
   ##
   ## Rules for scaling.masa.com/v1alpha1, Kind: MSAgenticScaling
@@ -98,5 +103,16 @@ rules:
       - list
       - patch
       - update
+      - watch
+  ##
+  ## StorageClass – needed for RWX storage class auto-discovery
+  ##
+  - apiGroups:
+      - storage.k8s.io
+    resources:
+      - storageclasses
+    verbs:
+      - get
+      - list
       - watch
 #+kubebuilder:scaffold:rules

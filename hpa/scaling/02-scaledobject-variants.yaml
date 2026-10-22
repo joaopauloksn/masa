@@ -1,0 +1,242 @@
+---
+# Sensitivity-analysis variants for the KEDA + HPA baseline.
+#
+# EVERYTHING IN THIS FILE IS COMMENTED OUT ON PURPOSE and the file is NOT listed
+# in kustomization.yaml.  The baseline (01-scaledobject.yaml) must remain the
+# only active ScaledObject for the iotoccupancy-sample-mosquitto Deployment:
+# two ScaledObjects targeting the same workload fight over the same HPA and
+# KEDA rejects the second one.
+#
+# To run a variant:
+#   1. oc delete scaledobject iotoccupancy-sample-mosquitto-scaler -n iotoccupancy
+#   2. Uncomment ONE variant document below (strip the leading "# ").
+#   3. oc apply -f ginga/hpa/scaling/02-scaledobject-variants.yaml
+#   4. Run the 30-minute benchmark, collect the CSV, then delete the variant and
+#      re-apply the baseline (oc apply -k ginga/hpa/scaling/).
+#
+# Baseline reference: T = 400 msg/s/pod, desired = ceil(M / T).
+#
+#   +-----------+------------+------------------------------------------------+
+#   | Variant   | Threshold  | Expected behaviour                             |
+#   +-----------+------------+------------------------------------------------+
+#   | A         | T = 300    | Conservative: more pods per msg/s, earlier     |
+#   |           |            | scale-up, lower latency, higher cost.          |
+#   | baseline  | T = 400    | Reference profile (mirrors MASA matrix).       |
+#   | B         | T = 500    | Aggressive: fewer pods, cheaper, risk of SLA   |
+#   |           |            | breach (P90 latency) at load peaks.            |
+#   | C         | T = 400 +  | Composite: throughput OR P90 latency drives    |
+#   |           | P90 <= 0.85|  scaling; HPA uses the max of both metrics.    |
+#   +-----------+------------+------------------------------------------------+
+#
+# Replica count examples (M = total msg/s):
+#   M = 1200 -> A: 4, baseline: 3, B: 3
+#   M = 3000 -> A: 10, baseline: 8, B: 6
+#   M = 6000 -> A: 20 -> capped at 15, baseline: 15, B: 12
+#
+# ---------------------------------------------------------------------------
+# Variant A - conservative (T = 300)
+# ---------------------------------------------------------------------------
+# apiVersion: keda.sh/v1alpha1
+# kind: ScaledObject
+# metadata:
+#   name: iotoccupancy-sample-mosquitto-scaler
+#   namespace: iotoccupancy
+#   labels:
+#     app.kubernetes.io/part-of: keda-hpa-baseline
+#     app.kubernetes.io/component: scaling
+#     keda-hpa-baseline/variant: t300-conservative
+# spec:
+#   scaleTargetRef:
+#     apiVersion: apps/v1
+#     kind: Deployment
+#     name: iotoccupancy-sample-mosquitto
+#   minReplicaCount: 1
+#   maxReplicaCount: 15
+#   pollingInterval: 15
+#   cooldownPeriod: 60
+#   triggers:
+#     - type: prometheus
+#       metricType: AverageValue
+#       metadata:
+#         serverAddress: https://thanos-querier.openshift-monitoring.svc:9091
+#         namespace: iotoccupancy
+#         metricName: mqtt_total_message_rate
+#         query: >-
+#           sum(rate(mqtt_delivered_messages_total{job="mqtt-load-tester-metrics"}[1m]))
+#           + sum(rate(mqtt_undelivered_messages_total{job="mqtt-load-tester-metrics"}[1m]))
+#         threshold: "300"
+#         authModes: bearer
+#         unsafeSsl: "true"
+#       authenticationRef:
+#         name: thanos-trigger-auth
+#   advanced:
+#     horizontalPodAutoscalerConfig:
+#       behavior:
+#         scaleUp:
+#           stabilizationWindowSeconds: 0
+#           selectPolicy: Max
+#           policies:
+#             - type: Percent
+#               value: 100
+#               periodSeconds: 15
+#             - type: Pods
+#               value: 4
+#               periodSeconds: 15
+#         scaleDown:
+#           stabilizationWindowSeconds: 60
+#           selectPolicy: Min
+#           policies:
+#             - type: Percent
+#               value: 25
+#               periodSeconds: 30
+#             - type: Pods
+#               value: 2
+#               periodSeconds: 30
+#
+# ---------------------------------------------------------------------------
+# Variant B - aggressive (T = 500)
+# ---------------------------------------------------------------------------
+# Identical to Variant A except for the label and the threshold.
+#
+# apiVersion: keda.sh/v1alpha1
+# kind: ScaledObject
+# metadata:
+#   name: iotoccupancy-sample-mosquitto-scaler
+#   namespace: iotoccupancy
+#   labels:
+#     app.kubernetes.io/part-of: keda-hpa-baseline
+#     app.kubernetes.io/component: scaling
+#     keda-hpa-baseline/variant: t500-aggressive
+# spec:
+#   scaleTargetRef:
+#     apiVersion: apps/v1
+#     kind: Deployment
+#     name: iotoccupancy-sample-mosquitto
+#   minReplicaCount: 1
+#   maxReplicaCount: 15
+#   pollingInterval: 15
+#   cooldownPeriod: 60
+#   triggers:
+#     - type: prometheus
+#       metricType: AverageValue
+#       metadata:
+#         serverAddress: https://thanos-querier.openshift-monitoring.svc:9091
+#         namespace: iotoccupancy
+#         metricName: mqtt_total_message_rate
+#         query: >-
+#           sum(rate(mqtt_delivered_messages_total{job="mqtt-load-tester-metrics"}[1m]))
+#           + sum(rate(mqtt_undelivered_messages_total{job="mqtt-load-tester-metrics"}[1m]))
+#         threshold: "500"
+#         authModes: bearer
+#         unsafeSsl: "true"
+#       authenticationRef:
+#         name: thanos-trigger-auth
+#   advanced:
+#     horizontalPodAutoscalerConfig:
+#       behavior:
+#         scaleUp:
+#           stabilizationWindowSeconds: 0
+#           selectPolicy: Max
+#           policies:
+#             - type: Percent
+#               value: 100
+#               periodSeconds: 15
+#             - type: Pods
+#               value: 4
+#               periodSeconds: 15
+#         scaleDown:
+#           stabilizationWindowSeconds: 60
+#           selectPolicy: Min
+#           policies:
+#             - type: Percent
+#               value: 25
+#               periodSeconds: 30
+#             - type: Pods
+#               value: 2
+#               periodSeconds: 30
+#
+# ---------------------------------------------------------------------------
+# Variant C - composite throughput + P90 latency trigger
+# ---------------------------------------------------------------------------
+# Two triggers: the HPA evaluates each metric independently and scales to the
+# LARGEST desired replica count.
+#   - Trigger 1: same throughput trigger as the baseline (T = 400 msg/s/pod).
+#   - Trigger 2: P90 delivery latency (seconds), same expression MASA's
+#     perception agent uses (monitor.py get_quantile_90).  Latency is a
+#     cluster-level quantity, NOT additive per pod, so it uses
+#     metricType: Value (compared as-is, not divided by replica count):
+#       desired = ceil(currentReplicas * P90 / threshold)
+#     threshold 0.85 s = upper edge of MASA's "loaded, within SLA" band
+#     (SLA target_quantile_90 = 1.0 s).
+#
+# apiVersion: keda.sh/v1alpha1
+# kind: ScaledObject
+# metadata:
+#   name: iotoccupancy-sample-mosquitto-scaler
+#   namespace: iotoccupancy
+#   labels:
+#     app.kubernetes.io/part-of: keda-hpa-baseline
+#     app.kubernetes.io/component: scaling
+#     keda-hpa-baseline/variant: composite-latency
+# spec:
+#   scaleTargetRef:
+#     apiVersion: apps/v1
+#     kind: Deployment
+#     name: iotoccupancy-sample-mosquitto
+#   minReplicaCount: 1
+#   maxReplicaCount: 15
+#   pollingInterval: 15
+#   cooldownPeriod: 60
+#   triggers:
+#     - type: prometheus
+#       metricType: AverageValue
+#       metadata:
+#         serverAddress: https://thanos-querier.openshift-monitoring.svc:9091
+#         namespace: iotoccupancy
+#         metricName: mqtt_total_message_rate
+#         query: >-
+#           sum(rate(mqtt_delivered_messages_total{job="mqtt-load-tester-metrics"}[1m]))
+#           + sum(rate(mqtt_undelivered_messages_total{job="mqtt-load-tester-metrics"}[1m]))
+#         threshold: "400"
+#         authModes: bearer
+#         unsafeSsl: "true"
+#       authenticationRef:
+#         name: thanos-trigger-auth
+#     - type: prometheus
+#       metricType: Value
+#       metadata:
+#         serverAddress: https://thanos-querier.openshift-monitoring.svc:9091
+#         namespace: iotoccupancy
+#         metricName: mqtt_delivery_latency_p90_seconds
+#         query: >-
+#           histogram_quantile(0.90, sum(rate(mqtt_message_delivery_time_seconds_histogram_bucket{job="mqtt-load-tester-metrics"}[1m])) by (le))
+#         threshold: "0.85"
+#         # Return 0 instead of failing when no samples exist (idle / no traffic).
+#         ignoreNullValues: "true"
+#         authModes: bearer
+#         unsafeSsl: "true"
+#       authenticationRef:
+#         name: thanos-trigger-auth
+#   advanced:
+#     horizontalPodAutoscalerConfig:
+#       behavior:
+#         scaleUp:
+#           stabilizationWindowSeconds: 0
+#           selectPolicy: Max
+#           policies:
+#             - type: Percent
+#               value: 100
+#               periodSeconds: 15
+#             - type: Pods
+#               value: 4
+#               periodSeconds: 15
+#         scaleDown:
+#           stabilizationWindowSeconds: 60
+#           selectPolicy: Min
+#           policies:
+#             - type: Percent
+#               value: 25
+#               periodSeconds: 30
+#             - type: Pods
+#               value: 2
+#               periodSeconds: 30

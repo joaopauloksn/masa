@@ -10,17 +10,24 @@
 
 ```
 ginga/                          ← repository root
-├── masa-i/                     ← MASA implementation (this project)
-│   ├── docs/                   ← full documentation
+├── masa-i/                     ← MASA implementation (Multi-Agent Autoscaler)
+│   ├── docs/                   ← full documentation & operational guides
 │   ├── masa-autoscaler-operator/
 │   ├── masa-agent-understanding/
 │   ├── masa-agent-perception/
 │   ├── masa-agent-planning/
 │   ├── masa-agent-action/
 │   ├── masa-agent-reflection/
+│   ├── masa-dashboard/
+│   ├── training/               ← offline training pipeline & model artifacts
 │   └── masa-baseimage/
-├── load-test-manage/
-└── load-test-py/
+├── hpa/                        ← KEDA + Native HPA Baseline Benchmark suite
+│   ├── operator/               ← OpenShift KEDA operator manifests
+│   ├── auth/                   ← Thanos Querier RBAC & TriggerAuthentication
+│   ├── scaling/                ← ScaledObject & HPA configuration
+│   └── scripts/                ← Automated benchmark deployment & evaluation scripts
+├── load-test-manage/           ← 14-step multi-phase load test controller
+└── load-test-py/               ← Paho MQTT client (QoS 2, Prometheus metrics)
 ```
 
 ---
@@ -37,11 +44,11 @@ A **Kubernetes Operator** (`MSAgenticScaling` CRD) deploys and manages all agent
 
 | Agent | Folder | Role | K8s type |
 |---|---|---|---|
-| **Understanding** | [`masa-agent-understanding/`](./masa-i/masa-agent-understanding/) | Reads the `MSAgenticScaling` CR → writes `governance_context` to MongoDB | CronJob |
-| **Perception** | [`masa-agent-perception/`](./masa-i/masa-agent-perception/) | Queries Thanos/Prometheus → writes time-series metrics to MongoDB | CronJob |
-| **Planning** | [`masa-agent-planning/`](./masa-i/masa-agent-planning/) | Trains model (`docker-training/`) + predicts replica count and writes scaling plan (`docker/`) | CronJob + Deployment |
-| **Action** | [`masa-agent-action/`](./masa-i/masa-agent-action/) | Claims oldest pending scaling plan → patches Kubernetes Deployment replicas | Deployment |
-| **Reflection** | [`masa-agent-reflection/`](./masa-i/masa-agent-reflection/) | Evaluates post-scaling quality → writes `model_feedback` → triggers model reset if needed | CronJob |
+| **Understanding** | [`masa-agent-understanding/`](./masa-i/masa-agent-understanding/) | Reads the `MSAgenticScaling` CR → writes `governance_context` to MongoDB | Job / Event-driven |
+| **Perception** | [`masa-agent-perception/`](./masa-i/masa-agent-perception/) | Scrapes OpenShift Thanos Querier (15s tick) → computes SLA labels → writes time-series metrics to MongoDB | Deployment |
+| **Planning** | [`masa-agent-planning/`](./masa-i/masa-agent-planning/) | Runs 4-feature neural network inference (every 30s) + handles offline/online training | Deployment + CronJob |
+| **Action** | [`masa-agent-action/`](./masa-i/masa-agent-action/) | Claims pending scaling plans, applies cooldown governance, and scales Kubernetes Deployment | Deployment |
+| **Reflection** | [`masa-agent-reflection/`](./masa-i/masa-agent-reflection/) | Evaluates post-scaling quality ($N=5$), tracks rolling MAE, and resets MSE gate on persistent degradation | CronJob |
 
 ---
 
@@ -50,10 +57,15 @@ A **Kubernetes Operator** (`MSAgenticScaling` CRD) deploys and manages all agent
 | Document | Description |
 |---|---|
 | [Architecture](./masa-i/docs/architecture.md) | Data-flow diagram, agent responsibilities, MongoDB collections, shared PVC files |
+| [Operational State Handoff](./masa-i/docs/session_handoff_summary.md) | Comprehensive production handoff: agents, security, load test evaluation, runbooks |
 | [Operator & CRD](./masa-i/docs/operator.md) | Installation, `MSAgenticScaling` CR spec reference, RBAC, Thanos auto-discovery |
 | [Agents](./masa-i/docs/agents.md) | Per-agent reference: env vars, volumes, SLA labels, plan status lifecycle |
 | [Secrets & Security](./masa-i/docs/secrets.md) | Credential management, projected ServiceAccount tokens, resolution order |
+| [Offline Training Guide](./masa-i/docs/offline_training_guide.md) | Parameter sweep data collection, neural network retraining, model PVC deployment |
+| [KEDA + HPA Baseline](./hpa/README.md) | Custom metrics baseline setup, PromQL triggers, comparison runbook |
+| [Threshold Derivation & Analysis](./hpa/threshold_derivation_and_comparative_analysis.md) | Mathematical capacity derivation ($T=400$) and Oracle Baseline analysis |
 | [Observability](./masa-i/docs/observability.md) | Prometheus metrics, ServiceMonitor config, alert rules, MongoDB audit trail |
+| [Live Dashboard](./masa-i/docs/dashboard.md) | MASA live system health dashboard setup and UI overview |
 
 ---
 
@@ -82,13 +94,19 @@ The operator will automatically discover the Thanos Querier URL from the OpenShi
 
 ## Machine Learning Model
 
-The Planning agent trains a small neural network on real-world operational metrics labelled with service-level objectives (SLOs).
+The Planning agent evaluates a 4-dimensional neural network regression model on real-world operational telemetry labelled with service-level objectives (SLOs).
 
-- **Input:** total MQTT messages (delivered + undelivered), normalised by observed maximum
-- **Output:** recommended number of replicas
-- **Training data:** `label=2` rows from `mongo_scaling.microservices` — observations where the current replica count was meeting the SLA
-- **Retraining:** automatic via the Planning-Training CronJob; a new model is written to the shared PVC only when MSE improves on the current best
-- **Quality gate:** the Reflection agent monitors rolling MAE and post-scaling SLA breaches; it deletes `best_mse.txt` to force unconditional retraining when quality degrades below threshold
+- **Input Features (4-Vector):**
+  1. `total_msg`: Total message throughput (delivered + undelivered), normalised to $[0, 300]$ via `max_total_msg`
+  2. `pct_delivered_norm`: Percentage of successfully delivered messages $[0, 1]$
+  3. `latency_ratio`: P90 latency normalised to $[0, 1]$ with a 2.0s ceiling
+  4. `undelivered_norm`: Dropped message rate $[0, 1]$ (acts as a saturation pressure indicator)
+- **Output:** Recommended replica count (continuous sizing mapped via zero-load bypass, low-load calibration, and ceil headroom)
+- **Label-Adjusted Target Mapping:** Uses all operational data without discarding breach samples:
+  - $\text{label}=1$ (SLA Breach) $\rightarrow \text{Target} = \text{Replicas} + 1$ (learns under-provisioning)
+  - $\text{label}=2$ (SLA Met) $\rightarrow \text{Target} = \text{Replicas}$ (optimal baseline)
+  - $\text{label}=3$ (Over-provisioned) $\rightarrow \text{Target} = \max(1, \text{Replicas} - 1)$ (learns efficiency trimming)
+- **Quality Gate:** Reflection agent monitors rolling MAE and post-scaling SLA breaches ($N=5$). On 3 consecutive failure runs, it deletes `/mnt/model/best_mse.txt` to trigger unconditional model replacement on the next training cycle.
 
 ---
 

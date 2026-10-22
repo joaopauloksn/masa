@@ -30,6 +30,7 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 logger = logging.getLogger(__name__)
 
 SCALER_FILE = os.getenv('SCALER_FILE', '/mnt/model/scaler.json')
+IDLE_TOTAL_MSG_THRESHOLD = float(os.getenv('IDLE_TOTAL_MSG_THRESHOLD', '1.0'))
 
 
 # ---------------------------------------------------------------------------
@@ -52,23 +53,35 @@ def _read_secret_file(path: str, fallback_env: str) -> str:
 # Scaler
 # ---------------------------------------------------------------------------
 
-def load_scaler() -> float:
+_SCALER_DEFAULTS = {
+    "max_total_msg":   300.0,
+    "latency_cap":     2.0,
+    "max_undelivered": 1.0,
+    "features":        ["total_msg", "pct_delivered_norm", "latency_ratio", "undelivered_norm"],
+}
+
+def load_scaler() -> dict:
     """
-    Load the normalisation max_total_msg written by the training job.
-    Falls back to 300 if the file is missing so old models keep working.
+    Load the normalisation constants written by the training job.
+    Returns a dict with keys: max_total_msg, latency_cap, features.
+    Falls back to safe defaults if the file is missing or uses the old
+    single-value format so legacy models keep working.
     """
     try:
         with open(SCALER_FILE) as f:
-            data = json.load(f)
-        max_val = float(data["max_total_msg"])
-        logger.info("Loaded scaler: max_total_msg=%.2f from %s", max_val, SCALER_FILE)
-        return max_val
+            raw = json.load(f)
+        # Backwards-compat: old scaler.json only had {"max_total_msg": X}
+        if isinstance(raw, (int, float)):
+            raw = {"max_total_msg": float(raw)}
+        scaler = {**_SCALER_DEFAULTS, **raw}
+        logger.info("Loaded scaler from %s: %s", SCALER_FILE, scaler)
+        return scaler
     except FileNotFoundError:
-        logger.warning("Scaler file not found at %s – falling back to default max 300.", SCALER_FILE)
-        return 300.0
+        logger.warning("Scaler file not found at %s – using defaults.", SCALER_FILE)
+        return dict(_SCALER_DEFAULTS)
     except Exception as e:
-        logger.error("Error loading scaler file: %s – falling back to default max 300.", e)
-        return 300.0
+        logger.error("Error loading scaler file: %s – using defaults.", e)
+        return dict(_SCALER_DEFAULTS)
 
 
 # ---------------------------------------------------------------------------
@@ -167,17 +180,53 @@ def _connect_metrics_mongo():
         return None
 
 
+# How many of the most-recent perception rows to inspect when deciding
+# whether to suppress a scale-up plan.  Majority vote among these rows.
+_ROLLING_ROWS   = 5
+_LABEL_SUPPRESS_ROWS = 3   # look at the N most-recent labels for suppression check
+
+
 def get_latest_data():
     collection = _connect_metrics_mongo()
     if collection is None:
         logger.error("Failed to connect to MongoDB.")
         return None
-    data = pd.DataFrame(list(collection.find().sort("timestamp", -1).limit(1)))
+    # Fetch the last N rows and average them so a single noisy sample
+    # does not cause erratic replica changes.
+    rows = list(collection.find().sort("timestamp", -1).limit(_ROLLING_ROWS))
+    data = pd.DataFrame(rows)
     if data.empty:
         logger.error("No data found for prediction.")
         return None
-    logger.info(f"Data used for prediction:\n{data}")
-    return data
+    if len(data) < _ROLLING_ROWS:
+        logger.warning(
+            "Only %d row(s) available for rolling average (expected %d) – using what is present.",
+            len(data), _ROLLING_ROWS,
+        )
+    # Average numeric columns; keep the most-recent value for non-numeric ones
+    numeric_cols = data.select_dtypes(include="number").columns.tolist()
+    averaged = data[numeric_cols].mean().to_frame().T
+    # Preserve the most-recent metadata columns (timestamp, _id, etc.) for logging
+    for col in ["timestamp", "_id", "metadata"]:
+        if col in data.columns:
+            averaged[col] = data.iloc[0][col]
+    logger.info("Rolling average over %d row(s) used for prediction.", len(data))
+    logger.debug("Averaged data:\n%s", averaged)
+    return averaged
+
+
+def get_recent_labels() -> list[int]:
+    """Return the labels of the N most-recent perception rows, newest first."""
+    collection = _connect_metrics_mongo()
+    if collection is None:
+        return []
+    rows = list(
+        collection.find(
+            {"label": {"$exists": True}},
+            {"label": 1, "_id": 0},
+        ).sort("timestamp", -1).limit(_LABEL_SUPPRESS_ROWS)
+    )
+    return [int(r["label"]) for r in rows if "label" in r]
 
 
 # ---------------------------------------------------------------------------
@@ -185,24 +234,78 @@ def get_latest_data():
 # ---------------------------------------------------------------------------
 
 def prepare_data_for_prediction(data):
-    if 'm_delivered' not in data.columns or 'm_undelivered' not in data.columns:
-        logger.error("Required columns 'm_delivered' and 'm_undelivered' are missing.")
-        return None, None
+    """Build the feature vector that matches the training feature set.
 
-    data['total_messages'] = data['m_delivered'] + data['m_undelivered']
-    logger.debug(f"Delivered: {data['m_delivered'].iloc[0]}, Undelivered: {data['m_undelivered'].iloc[0]}, Total: {data['total_messages'].iloc[0]}")
+    Features (must match training.py prepare_data):
+      1. total_msg            normalised to [0, 300]
+      2. pct_delivered_norm   delivery % / 100
+      3. latency_ratio        P90 latency / latency_cap  (capped at 1.0)
+      4. undelivered_norm     m_undelivered / max_undelivered (from scaler.json)
+                              Rises under broker saturation — demand-pressure signal.
+                              Falls back to 0.0 if column absent.
+    """
+    # When there is no traffic, Prometheus returns no metric samples for rate(),
+    # so m_delivered and m_undelivered will be None / missing in MongoDB.
+    # Default absent/NaN metrics to 0.0 (idle state).
+    data = data.copy()
+    for col in ['m_delivered', 'm_undelivered']:
+        if col not in data.columns:
+            logger.info("'%s' column missing from metrics – treating as 0.0 (idle).", col)
+            data[col] = 0.0
+        else:
+            data[col] = data[col].fillna(0.0)
 
-    if pd.isna(data['total_messages'].iloc[0]):
-        logger.warning("Total messages is NaN.")
-        return None, None
+    scaler = load_scaler()
+    max_total        = scaler["max_total_msg"]
+    latency_cap      = scaler["latency_cap"]
+    max_undelivered  = scaler.get("max_undelivered") or 1.0
 
-    max_total = load_scaler()
-    total_raw = float(data['total_messages'].iloc[0])   # keep raw value for confidence
+    # ── Feature 1: total throughput ──────────────────────────────────────────
+    data['total_msg'] = data['m_delivered'] + data['m_undelivered']
+    total_raw = float(data['total_msg'].iloc[0]) if not data.empty else 0.0
+    if pd.isna(total_raw):
+        total_raw = 0.0
 
-    data['total_messages'] = (data['total_messages'] / max_total) * 300
-    data['total_messages'] = data['total_messages'].fillna(0).astype(int)
+    data['total_msg'] = (data['total_msg'] / max_total) * 300
+    data['total_msg'] = data['total_msg'].fillna(0).astype(int)
 
-    X_scaled = data[['total_messages']].to_numpy().astype(np.float32).reshape(1, -1)
+    # ── Feature 2: delivery percentage ───────────────────────────────────────
+    PCTCOL = 'm_percentage__delivered'
+    if PCTCOL in data.columns:
+        data['pct_delivered_norm'] = data[PCTCOL].fillna(0).clip(0, 100) / 100.0
+    else:
+        logger.warning("'%s' column missing for prediction – defaulting to 1.0.", PCTCOL)
+        data['pct_delivered_norm'] = 1.0
+
+    # ── Feature 3: P90 latency ratio ─────────────────────────────────────────
+    LATCOL = 'm_quantile_90'
+    if LATCOL in data.columns:
+        data['latency_ratio'] = data[LATCOL].fillna(latency_cap).clip(0, latency_cap) / latency_cap
+    else:
+        logger.warning("'%s' column missing for prediction – defaulting to 0.0.", LATCOL)
+        data['latency_ratio'] = 0.0
+
+    # ── Feature 4: undelivered message rate ──────────────────────────────────
+    UDCOL = 'm_undelivered'
+    if UDCOL in data.columns:
+        data['undelivered_norm'] = (
+            data[UDCOL].fillna(0).clip(0, max_undelivered) / max_undelivered
+        )
+    else:
+        logger.warning("'%s' column missing for prediction – defaulting to 0.0.", UDCOL)
+        data['undelivered_norm'] = 0.0
+
+    FEATURES = ['total_msg', 'pct_delivered_norm', 'latency_ratio', 'undelivered_norm']
+    logger.debug(
+        "Prediction features: total_msg=%.1f pct_delivered_norm=%.4f "
+        "latency_ratio=%.4f undelivered_norm=%.4f",
+        float(data['total_msg'].iloc[0]),
+        float(data['pct_delivered_norm'].iloc[0]),
+        float(data['latency_ratio'].iloc[0]),
+        float(data['undelivered_norm'].iloc[0]),
+    )
+
+    X_scaled = data[FEATURES].to_numpy().astype(np.float32).reshape(1, -1)
     return X_scaled, total_raw
 
 
@@ -238,6 +341,11 @@ def predict_from_model(model_path: str):
 
     confidence is derived from the raw model output: the closer the raw output
     is to an integer, the higher the certainty. Capped at [0, 1].
+
+    Shape compatibility: if the saved model was trained with fewer features than
+    the current feature vector (e.g. old 1-feature model is still on the PVC),
+    the input is automatically trimmed to the model's expected width so
+    predictions keep working until a fresh retrain produces a 3-feature model.
     """
     data = get_latest_data()
     if data is None or data.empty:
@@ -257,18 +365,43 @@ def predict_from_model(model_path: str):
         return None, None
 
     try:
-        raw_output = model.predict(X_scaled, verbose=0)
-        raw_value  = float(raw_output[0][0])
-        logger.debug(f"Raw model output: {raw_value}")
+        # Detect expected input width and trim X if the model is older
+        expected_features = model.input_shape[-1]
+        actual_features   = X_scaled.shape[-1]
+        if actual_features != expected_features:
+            logger.warning(
+                "Model expects %d feature(s) but feature vector has %d. "
+                "Trimming to %d – retrain to use the full feature set.",
+                expected_features, actual_features, expected_features,
+            )
+            X_scaled = X_scaled[:, :expected_features]
 
-        predicted_replicas = max(1, int(np.ceil(raw_value)))
-        logger.info(f"Predicted replicas: {predicted_replicas}")
+        # If no data / no traffic is being sent (idle state), directly predict 1 replica
+        if total_raw <= IDLE_TOTAL_MSG_THRESHOLD:
+            logger.info(
+                "No traffic / idle detected (total_raw=%.2f <= threshold=%.2f) – predicting 1 replica.",
+                total_raw, IDLE_TOTAL_MSG_THRESHOLD,
+            )
+            predicted_replicas = 1
+            confidence = 1.0
+        else:
+            raw_output = model.predict(X_scaled, verbose=0)
+            raw_value  = float(raw_output[0][0])
+            logger.debug(f"Raw model output: {raw_value}")
 
-        # Confidence: how close the raw output is to the ceiled integer (0 = fractional, 1 = exact)
-        fractional_part = abs(raw_value - np.floor(raw_value))
-        confidence = round(1.0 - min(fractional_part, 1.0 - fractional_part) * 2, 4)
+            # If raw value is within 0.2 of 1.0 (e.g. <= 1.20) and no severe stress, round to 1 replica
+            # Otherwise use standard ceiling for responsive scale-up
+            if raw_value <= 1.20:
+                predicted_replicas = 1
+            else:
+                predicted_replicas = max(1, int(np.ceil(raw_value)))
+            logger.info(f"Predicted replicas: {predicted_replicas}")
+
+            # Confidence: how close the raw output is to the discrete prediction (0 = fractional, 1 = exact)
+            fractional_part = abs(raw_value - predicted_replicas)
+            confidence = round(max(0.0, 1.0 - min(fractional_part, 1.0)), 4)
+
         logger.info(f"Confidence: {confidence:.4f}")
-
         return predicted_replicas, confidence
     except Exception as e:
         logger.error(f"Error during prediction: {e}")
@@ -325,6 +458,31 @@ def predict_and_write_plan(model_path: str):
             "writing plan with current_replicas=unknown (0)."
         )
         current_replicas = 0
+
+    # ── Label-aware suppression ───────────────────────────────────────────────
+    # If the system is consistently label=3 (SLA exceeding / over-replicated)
+    # AND the model wants to scale UP, suppress the plan.  The model was trained
+    # only on label=2 data so it has no concept of "already too many replicas" —
+    # it will keep recommending more replicas as long as message volume is high,
+    # even when latency is already well below the SLA target.
+    #
+    # Suppression rule: if ALL of the last N labels are 3 AND
+    # predicted > current → skip writing the plan entirely.
+    recent_labels = get_recent_labels()
+    if recent_labels:
+        all_label3 = all(lbl == 3 for lbl in recent_labels)
+        wants_scaleup = predicted_replicas > current_replicas
+        if all_label3 and wants_scaleup:
+            logger.info(
+                "SUPPRESSED scale-up plan (%d→%d): last %d labels are all 3 "
+                "(system already exceeding SLA – no scale-up needed).",
+                current_replicas, predicted_replicas, len(recent_labels),
+            )
+            return
+        logger.debug(
+            "Label suppression check: recent_labels=%s all_label3=%s wants_scaleup=%s",
+            recent_labels, all_label3, wants_scaleup,
+        )
 
     try:
         mongo_client = store_connect()

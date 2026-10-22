@@ -1,4 +1,4 @@
-FROM jpksn/masa-baseimage:0.0.1
+FROM jpksn/masa-baseimage:1.0.1
 
 # Copy only requirements.txt first to leverage caching
 COPY requirements.txt .
@@ -8,7 +8,5 @@ RUN pip install -r requirements.txt
 
 # Copy the rest of the code
 COPY . .
-
-USER masa
 
 CMD ["python3","-u","src/task.py"]

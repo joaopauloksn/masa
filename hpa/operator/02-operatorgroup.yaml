@@ -1,0 +1,14 @@
+---
+# OperatorGroup for the Custom Metrics Autoscaler Operator.
+#
+# Using an empty `targetNamespaces` list (or omitting it entirely) makes the
+# OperatorGroup cluster-scoped, allowing the KEDA operator to watch resources
+# across all namespaces — required so that ScaledObjects in `iotoccupancy`
+# (and any other tenant namespace) are reconciled by the single operator pod
+# in `openshift-keda`.
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: openshift-keda
+  namespace: openshift-keda
+spec: {}   # Empty spec → cluster-wide watch scope

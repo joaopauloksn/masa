@@ -7,10 +7,14 @@ MASA is a Kubernetes-native agentic autoscaler. A Kubernetes Operator deploys a 
 | Document | Description |
 |---|---|
 | [Architecture](./architecture.md) | System overview, agent roles, data flows, MongoDB collections |
+| [Operational State Handoff](./session_handoff_summary.md) | Full technical handoff: agents, security, load test evaluation, runbooks |
 | [Operator & CRD](./operator.md) | How to install, configure and operate the operator |
 | [Agents](./agents.md) | Per-agent reference: responsibilities, env vars, PVC files |
 | [Secrets & Security](./secrets.md) | How credentials are managed (mounted secrets, projected tokens) |
+| [Offline Training Guide](./offline_training_guide.md) | Parameter sweep data collection, neural network retraining, model PVC deployment |
 | [Observability](./observability.md) | Prometheus metrics, ServiceMonitor, alerting guidance |
+| [Dashboard](./dashboard.md) | Live system health dashboard — setup and access |
+| [KEDA + HPA Baseline Benchmark](../../hpa/README.md) | Red Hat Custom Metrics Autoscaler baseline and comparison runbook |
 
 ---
 
@@ -66,7 +70,7 @@ kubectl apply -f masa-autoscaler-operator/config/crd/bases/scaling.masa.com_masa
 
 ```bash
 cd masa-autoscaler-operator
-make deploy IMG=jpksn/masa-operator:1.0.0
+make deploy IMG=jpksn/masa-operator:1.0.1
 ```
 
 ### 4. Apply your CR
@@ -89,9 +93,27 @@ The operator deploys agents in this order to ensure dependencies are satisfied b
 ```
 1. understanding-agent  (writes governance_context to MongoDB)
 2. model-pvc            (PersistentVolumeClaim for model artefacts)
-3. perception-agent     (CronJob — reads Thanos, writes microservices collection)
+3. perception-agent     (Deployment — reads Thanos every 15s, writes microservices collection)
 4. action-agent         (Deployment — polls scaling_plans, applies K8s patches)
-5. planning-training    (CronJob — trains model from microservices data)
-6. planning-agent       (Deployment — reads model, writes scaling_plans)
+5. planning-training    (CronJob — suspended until trainingEnabled: true)
+6. planning-agent       (Deployment — waits for model; logs warning until trained)
 7. reflection-agent     (CronJob — evaluates quality, writes model_feedback)
+```
+
+## Typical first-run workflow
+
+```
+Deploy CR (trainingEnabled: false)
+  → perception collects data every minute
+  → planning-agent logs "Model file not found – waiting for training"  ← expected
+  → reflection-agent skips evaluation when all metrics are None        ← expected
+
+[collect data for desired period with HPA variations]
+
+kubectl patch ... trainingEnabled: true
+  → planning-training CronJob unsuspended
+  → model trained and saved to PVC within 30 min (or trigger manually)
+  → planning-agent starts predicting and writing scaling_plans
+  → action-agent executes plans
+  → reflection-agent starts evaluating quality
 ```

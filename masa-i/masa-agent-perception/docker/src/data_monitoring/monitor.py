@@ -64,6 +64,19 @@ if not thanos_token:
         "or set the THANOS_TOKEN environment variable."
     )
 
+
+def _get_thanos_auth_headers() -> dict:
+    """Read the Thanos token fresh from disk on every call.
+
+    The projected ServiceAccount token is rotated by the kubelet before
+    expiry. Reading it each time ensures we never send a stale token.
+    Falls back to the value that was present at startup if the file
+    has somehow disappeared.
+    """
+    token = _read_secret_file(f"{THANOS_SECRET_DIR}/token", "THANOS_TOKEN") or thanos_token
+    return {"Authorization": "Bearer " + token}
+
+
 # MongoDB config
 mongo_host = os.getenv(
     "MONGO_HOST",
@@ -87,10 +100,6 @@ client = MongoClient(
 )
 mongodb = client["mongo_scaling"]
 
-# Authorization headers for Thanos / Prometheus
-headersAuth = {
-    "Authorization": "Bearer " + thanos_token,
-}
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +121,7 @@ class Microservice:
                 thanos_base_url,
                 params={"query": query},
                 verify=False,
-                headers=headersAuth,
+                headers=_get_thanos_auth_headers(),
             )
             if response.status_code == 200:
                 metric_result = response.json()
@@ -257,39 +266,62 @@ class Microservice:
             "m_percentage__delivered": 3,
             "m_quantile_90": 3,
         }
-        exceed_threshold = 1.05
 
+        # ── Delivery % scoring ────────────────────────────────────────────────
+        # Calibrated to mosquitto's real observed range in this cluster:
+        #   100%        → idle / no drops at all          → full score
+        #   99–100%     → loaded but healthy              → 0.75
+        #   ≥ target    → meeting SLA (target=90%)        → 0.50
+        #   ≥ 95% tgt   → degrading, approaching breach   → 0.25
+        #   < 95% tgt   → SLA breach                      → 0
         if time_series["m_percentage__delivered"] is not None and time_series["t_percentage__delivered"] is not None:
             delivered_percentage = min(float(time_series["m_percentage__delivered"]), 100)
             target_delivered = float(time_series["t_percentage__delivered"])
 
-            if delivered_percentage >= exceed_threshold * target_delivered:
-                score += weights["m_percentage__delivered"]
-            elif delivered_percentage >= 0.9 * target_delivered:
-                score += 0.75 * weights["m_percentage__delivered"]
-            elif delivered_percentage >= 0.75 * target_delivered:
-                score += 0.5 * weights["m_percentage__delivered"]
+            if delivered_percentage >= 100.0:
+                score += weights["m_percentage__delivered"]             # perfect — zero drops
+            elif delivered_percentage >= 99.0:
+                score += 0.75 * weights["m_percentage__delivered"]      # loaded but healthy
+            elif delivered_percentage >= target_delivered:
+                score += 0.5 * weights["m_percentage__delivered"]       # meeting SLA
+            elif delivered_percentage >= 0.95 * target_delivered:
+                score += 0.25 * weights["m_percentage__delivered"]      # degrading
 
             total_weight += weights["m_percentage__delivered"]
 
+        # ── Latency P90 scoring ───────────────────────────────────────────────
+        # Calibrated to mosquitto's real observed P90 range (0.009s idle → 0.81s peak).
+        # target_quantile_90 = 1.0 s (set in CR).
+        #
+        #   ≤ 10% target (≤0.10s) → idle / trivial load   → full score
+        #   ≤ 40% target (≤0.40s) → comfortable           → 0.75
+        #   ≤ 85% target (≤0.85s) → loaded, within SLA    → 0.50
+        #   ≤ 100% target (≤1.0s) → at SLA edge           → 0.25
+        #   > target              → SLA breach             → 0
         if time_series["m_quantile_90"] is not None and time_series["t_quantile_90"] is not None:
             quantile_90 = float(time_series["m_quantile_90"])
             target_quantile_90 = float(time_series["t_quantile_90"])
 
-            if quantile_90 <= target_quantile_90 * 0.85:
-                score += weights["m_quantile_90"]
-            elif quantile_90 <= 1.1 * target_quantile_90:
-                score += 0.75 * weights["m_quantile_90"]
-            elif quantile_90 <= 1.25 * target_quantile_90:
-                score += 0.5 * weights["m_quantile_90"]
+            if quantile_90 <= target_quantile_90 * 0.10:
+                score += weights["m_quantile_90"]                       # idle
+            elif quantile_90 <= target_quantile_90 * 0.40:
+                score += 0.75 * weights["m_quantile_90"]                # comfortable
+            elif quantile_90 <= target_quantile_90 * 0.85:
+                score += 0.5 * weights["m_quantile_90"]                 # loaded, within SLA
+            elif quantile_90 <= target_quantile_90 * 1.00:
+                score += 0.25 * weights["m_quantile_90"]                # at SLA edge
 
             total_weight += weights["m_quantile_90"]
 
         performance_ratio = score / total_weight if total_weight > 0 else 0
 
-        if performance_ratio >= 0.85:
+        # Label thresholds calibrated to this cluster's observed metric ranges:
+        #   ≥ 0.875 → label=3  EXCEEDING  (both metrics near-perfect: idle/very light load)
+        #   ≥ 0.500 → label=2  OK         (loaded but meeting SLA)
+        #   < 0.500 → label=1  BREACH     (SLA degraded or breached)
+        if performance_ratio >= 0.875:
             return 3
-        elif 0.65 <= performance_ratio < 0.85:
+        elif performance_ratio >= 0.500:
             return 2
         else:
             return 1

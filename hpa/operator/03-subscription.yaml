@@ -1,0 +1,27 @@
+---
+# OLM Subscription for the Red Hat Custom Metrics Autoscaler Operator.
+#
+# Package name:  openshift-custom-metrics-autoscaler-operator
+# Catalog:       redhat-operators  (shipped with OpenShift, in openshift-marketplace)
+# Channel:       stable  (tracks the latest stable minor release train)
+# InstallMode:   AllNamespaces — matches the cluster-scoped OperatorGroup above
+#
+# After applying this resource OLM will:
+#   1. Resolve the current CSV (ClusterServiceVersion) from the catalog.
+#   2. Create an InstallPlan and install all required CRDs (KedaController, …).
+#   3. Start the operator Deployment in `openshift-keda`.
+#
+# Check progress with:
+#   oc get sub -n openshift-keda openshift-custom-metrics-autoscaler-operator
+#   oc get csv -n openshift-keda
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: openshift-custom-metrics-autoscaler-operator
+  namespace: openshift-keda
+spec:
+  channel: stable
+  name: openshift-custom-metrics-autoscaler-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  # installPlanApproval: Automatic  ← default; change to Manual for gated upgrades

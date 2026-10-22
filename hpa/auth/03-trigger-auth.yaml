@@ -1,0 +1,42 @@
+---
+# TriggerAuthentication: thanos-trigger-auth
+#
+# Wires the KEDA Prometheus scaler to the OpenShift Thanos Querier using the
+# bearer token stored in the keda-thanos-reader-token Secret (populated by the
+# OpenShift token controller from the keda-thanos-reader ServiceAccount).
+#
+# The ScaledObject in ginga/hpa/scaling/ references this TriggerAuthentication
+# via spec.triggers[].authenticationRef.name = "thanos-trigger-auth".
+#
+# secretTargetRef mapping:
+#   parameter    → the KEDA Prometheus scaler parameter name
+#   name         → the Kubernetes Secret name in this namespace
+#   key          → the data key inside that Secret
+#
+# The KEDA Prometheus scaler understands the following auth parameters:
+#   bearerToken  – HTTP Authorization: Bearer <token> header sent to Thanos
+#   ca           – PEM CA bundle for TLS verification (omitted here; see note)
+#
+# TLS note: The Thanos Querier endpoint uses a certificate signed by the
+# OpenShift service-ca.  To verify it properly, add a second secretTargetRef
+# entry for parameter "ca" pointing to the service-ca.crt injected into the
+# openshift-service-ca/signing-key Secret, or mount the service-ca ConfigMap.
+# For this research baseline we rely on the authModes that skip server-cert
+# verification (unsafeSsl: "true" set in the ScaledObject trigger metadata),
+# keeping the manifest self-contained while still using a signed bearer token
+# for identity verification.
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: thanos-trigger-auth
+  namespace: iotoccupancy
+  labels:
+    app.kubernetes.io/part-of: keda-hpa-baseline
+    app.kubernetes.io/component: auth
+spec:
+  secretTargetRef:
+    # Bearer token extracted from the long-lived ServiceAccount token secret.
+    # The KEDA scaler will send this as the Authorization header to Thanos.
+    - parameter: bearerToken
+      name: keda-thanos-reader-token
+      key: token

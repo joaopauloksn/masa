@@ -1,0 +1,29 @@
+---
+# Kustomize entry-point for the KEDA scaling layer.
+#
+# Resources:
+#   1. 01-scaledobject.yaml  – baseline ScaledObject (T = 400 msg/s/pod,
+#                              1-15 replicas, 15 s polling, 60 s cooldown)
+#
+# 02-scaledobject-variants.yaml is intentionally NOT listed: it contains only
+# commented sensitivity-analysis variants (T=300, T=500, composite latency) and
+# must never be applied together with the baseline.
+#
+# Prerequisites (apply first):
+#   oc apply -k ginga/hpa/operator/   # KEDA operator + KedaController
+#   oc apply -k ginga/hpa/auth/       # ServiceAccount, RBAC, TriggerAuthentication
+#
+# Usage (direct):
+#   oc apply -k ginga/hpa/scaling/
+#
+# Usage via the top-level deploy script (recommended):
+#   ./ginga/hpa/scripts/deploy-keda-hpa.sh
+#
+# Verify:
+#   oc get scaledobject -n iotoccupancy      # READY=True, ACTIVE=True
+#   oc get hpa -n iotoccupancy               # keda-hpa-iotoccupancy-sample-mosquitto-scaler
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - 01-scaledobject.yaml

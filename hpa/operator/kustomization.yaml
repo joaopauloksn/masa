@@ -1,0 +1,21 @@
+---
+# Kustomize entry-point for the KEDA operator installation layer.
+#
+# Apply order matters — resources are applied sequentially, so the Namespace
+# must exist before OperatorGroup/Subscription, and KedaController must only
+# be applied after the CRD has been registered by OLM (handled by the
+# deploy-keda-hpa.sh script which waits for the CSV to reach Succeeded).
+#
+# Usage (direct):
+#   oc apply -k ginga/hpa/operator/
+#
+# Usage via the top-level deploy script (recommended):
+#   ./ginga/hpa/scripts/deploy-keda-hpa.sh
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - 01-namespace.yaml
+  - 02-operatorgroup.yaml
+  - 03-subscription.yaml
+  - 04-kedacontroller.yaml

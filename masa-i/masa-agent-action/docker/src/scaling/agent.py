@@ -19,8 +19,13 @@ from kubernetes import client, config
 
 logger = logging.getLogger(__name__)
 
-MAX_REPLICAS = int(os.getenv("MAX_REPLICAS", "20"))
-MIN_REPLICAS = int(os.getenv("MIN_REPLICAS", "1"))
+MAX_REPLICAS      = int(os.getenv("MAX_REPLICAS",       "20"))
+MIN_REPLICAS      = int(os.getenv("MIN_REPLICAS",       "1"))
+# Skip scaling if the delta is smaller than this value — prevents constant
+# ±1-replica churn from noisy predictions.
+# Default is 1 (act on every replica change).  Set to 2 to add a deadband
+# that ignores single-replica fluctuations (useful once the model is well-trained).
+MIN_REPLICA_DELTA = int(os.getenv("MIN_REPLICA_DELTA",  "1"))
 
 
 # ---------------------------------------------------------------------------
@@ -139,8 +144,20 @@ def execute_pending_plan(plans_collection) -> bool:
 
     if live_replicas == desired_replicas:
         logger.info(
-            "Live replicas (%d) already match desired (%d) – skipping.",
-            live_replicas, desired_replicas,
+            "Plan %s skipped – live replicas already at %d (desired=%d).",
+            plan_id, live_replicas, desired_replicas,
+        )
+        mark_skipped(plans_collection, plan_id)
+        return True
+
+    # Deadband: ignore changes smaller than MIN_REPLICA_DELTA to avoid
+    # constant churn from model noise (e.g. 3→4→3 every few minutes).
+    delta = abs(desired_replicas - live_replicas)
+    if delta < MIN_REPLICA_DELTA:
+        logger.info(
+            "Plan %s skipped – delta %d < MIN_REPLICA_DELTA %d "
+            "(live=%d, desired=%d).",
+            plan_id, delta, MIN_REPLICA_DELTA, live_replicas, desired_replicas,
         )
         mark_skipped(plans_collection, plan_id)
         return True
